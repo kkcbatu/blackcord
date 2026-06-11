@@ -8,7 +8,9 @@ const defaultAudioSettings = {
   echoCancellation: true,
   noiseSuppression: true,
   autoGainControl: true,
-  noiseLevel: "standard"
+  noiseLevel: "strong",
+  noiseGate: true,
+  gateThreshold: 32
 };
 
 const presetSettings = {
@@ -17,21 +19,27 @@ const presetSettings = {
     echoCancellation: true,
     noiseSuppression: true,
     autoGainControl: true,
-    noiseLevel: "strong"
+    noiseLevel: "strong",
+    noiseGate: true,
+    gateThreshold: 38
   },
   balanced: {
     bitrate: 64000,
     echoCancellation: true,
     noiseSuppression: true,
     autoGainControl: true,
-    noiseLevel: "standard"
+    noiseLevel: "standard",
+    noiseGate: true,
+    gateThreshold: 32
   },
   studio: {
     bitrate: 128000,
     echoCancellation: false,
     noiseSuppression: false,
     autoGainControl: false,
-    noiseLevel: "off"
+    noiseLevel: "off",
+    noiseGate: false,
+    gateThreshold: 20
   }
 };
 
@@ -43,14 +51,22 @@ const state = {
   users: [],
   channels: { voice1: [], voice2: [] },
   currentVoice: null,
+  rawMicStream: null,
   localStream: null,
   screenStream: null,
+  audioContext: null,
+  audioNodes: null,
+  gateTimer: null,
+  micLevel: 0,
   muted: false,
   reconnectTimer: null,
   statsTimer: null,
   peers: new Map(),
   audio: { ...defaultAudioSettings, ...savedAudioSettings }
 };
+
+let lastSystemMessage = "";
+let lastSystemMessageAt = 0;
 
 const iceServers = [
   { urls: "stun:stun.l.google.com:19302" },
@@ -94,6 +110,9 @@ const noiseSuppression = $("#noiseSuppression");
 const autoGainControl = $("#autoGainControl");
 const audioStats = $("#audioStats");
 const noiseLevel = $("#noiseLevel");
+const noiseGate = $("#noiseGate");
+const gateThresholdRange = $("#gateThresholdRange");
+const gateThresholdLabel = $("#gateThresholdLabel");
 const stage = $("#stage");
 const stageStatus = $("#stageStatus");
 const videoGrid = $("#videoGrid");
@@ -135,7 +154,7 @@ chatForm.addEventListener("submit", event => {
   if (!text) return;
 
   if (!isConnected()) {
-    systemMessage("Baglanti kurulunca tekrar dene.");
+    systemMessage("Bağlantı kurulunca tekrar dene.");
     return;
   }
 
@@ -151,7 +170,7 @@ imageInput.addEventListener("change", async () => {
   if (!file) return;
 
   if (!isConnected()) {
-    systemMessage("Resim gondermek icin baglanti gerekli.");
+    systemMessage("Resim göndermek için bağlantı gerekli.");
     return;
   }
 
@@ -163,7 +182,7 @@ imageInput.addEventListener("change", async () => {
     });
     messageInput.value = "";
   } catch {
-    systemMessage("Resim hazirlanamadi. Daha kucuk bir dosya dene.");
+    systemMessage("Resim hazırlanamadı. Daha küçük bir dosya dene.");
   }
 });
 
@@ -193,7 +212,7 @@ avatarInput.addEventListener("change", async () => {
     renderAvatar(profileAvatar, state.myName, state.avatar);
     send("profile", { name: state.myName, avatar: state.avatar });
   } catch {
-    systemMessage("Profil fotografi hazirlanamadi.");
+    systemMessage("Profil fotoğrafı hazırlanamadı.");
   }
 });
 
@@ -238,11 +257,28 @@ for (const checkbox of [echoCancellation, noiseSuppression, autoGainControl]) {
   });
 }
 
+noiseGate.addEventListener("change", () => {
+  state.audio.noiseGate = noiseGate.checked;
+  saveAudioSettings();
+  applyAudioChanges(true);
+});
+
+gateThresholdRange.addEventListener("input", () => {
+  state.audio.gateThreshold = Number(gateThresholdRange.value);
+  saveAudioSettings();
+  renderAudioSettings();
+});
+
 noiseLevel.addEventListener("change", () => {
   state.audio.noiseLevel = noiseLevel.value;
   state.audio.noiseSuppression = noiseLevel.value !== "off";
+  state.audio.noiseGate = noiseLevel.value !== "off";
+  if (noiseLevel.value === "strong") state.audio.gateThreshold = Math.max(state.audio.gateThreshold, 38);
+  if (noiseLevel.value === "standard") state.audio.gateThreshold = Math.max(28, Math.min(state.audio.gateThreshold, 38));
   noiseSuppression.checked = state.audio.noiseSuppression;
+  noiseGate.checked = state.audio.noiseGate;
   saveAudioSettings();
+  renderAudioSettings();
   applyAudioChanges(true);
 });
 
@@ -282,10 +318,10 @@ function connect() {
 
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
   state.socket = new WebSocket(`${protocol}//${location.host}`);
-  connectionStatus.textContent = "Baglaniyor...";
+  connectionStatus.textContent = "Bağlanıyor...";
 
   state.socket.addEventListener("open", () => {
-    connectionStatus.textContent = "Baglandi";
+    connectionStatus.textContent = "Bağlandı";
     if (state.myName) send("join", { name: state.myName, avatar: state.avatar });
   });
 
@@ -296,14 +332,16 @@ function connect() {
   });
 
   state.socket.addEventListener("error", () => {
-    connectionStatus.textContent = "Baglanti hatasi";
+    connectionStatus.textContent = "Bağlantı hatası";
   });
 
   state.socket.addEventListener("message", event => {
+    if (typeof event.data !== "string") return;
+
     try {
       handleServerMessage(JSON.parse(event.data));
     } catch {
-      systemMessage("Sunucudan gecersiz veri geldi.");
+      return;
     }
   });
 }
@@ -359,7 +397,9 @@ function handleServerMessage(message) {
       break;
 
     case "error":
-      systemMessage(message.message || "Bir hata olustu.");
+      if (message.message && !/gecersiz|geçersiz/i.test(message.message)) {
+        systemMessage(message.message);
+      }
       break;
   }
 }
@@ -368,12 +408,12 @@ async function joinVoice(channel) {
   if (state.currentVoice === channel) return;
 
   if (!isConnected()) {
-    systemMessage("Ses kanalina girmek icin sunucu baglantisi gerekli.");
+    systemMessage("Ses kanalına girmek için sunucu bağlantısı gerekli.");
     return;
   }
 
   if (!navigator.mediaDevices?.getUserMedia) {
-    systemMessage("Bu tarayici mikrofonu desteklemiyor.");
+    systemMessage("Bu tarayıcı mikrofonu desteklemiyor.");
     return;
   }
 
@@ -386,16 +426,17 @@ async function joinVoice(channel) {
     renderVoiceControls();
     startStats();
   } catch {
-    systemMessage("Mikrofon izni alinamadi. Tarayici veya Windows mikrofon iznini kontrol et.");
+    systemMessage("Mikrofon izni alınamadı. Tarayıcı veya Windows mikrofon iznini kontrol et.");
   }
 }
 
 async function ensureLocalStream() {
   if (state.localStream) return state.localStream;
 
-  state.localStream = await navigator.mediaDevices.getUserMedia({
+  state.rawMicStream = await navigator.mediaDevices.getUserMedia({
     audio: buildAudioConstraints()
   });
+  state.localStream = await createProcessedMicStream(state.rawMicStream);
 
   await refreshDevices();
   return state.localStream;
@@ -420,6 +461,105 @@ function buildAudioConstraints() {
   return audio;
 }
 
+async function createProcessedMicStream(rawStream) {
+  if (!state.audio.noiseGate) return rawStream;
+
+  stopMicProcessing();
+
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) return rawStream;
+
+  const context = new AudioContextClass({
+    latencyHint: state.audio.noiseLevel === "strong" ? "interactive" : "balanced",
+    sampleRate: 48000
+  });
+
+  const source = context.createMediaStreamSource(rawStream);
+  const analyser = context.createAnalyser();
+  const highPass = context.createBiquadFilter();
+  const compressor = context.createDynamicsCompressor();
+  const gate = context.createGain();
+  const destination = context.createMediaStreamDestination();
+
+  analyser.fftSize = 512;
+  analyser.smoothingTimeConstant = 0.72;
+
+  highPass.type = "highpass";
+  highPass.frequency.value = state.audio.noiseLevel === "strong" ? 95 : 70;
+  highPass.Q.value = 0.7;
+
+  compressor.threshold.value = -36;
+  compressor.knee.value = 18;
+  compressor.ratio.value = 4;
+  compressor.attack.value = 0.004;
+  compressor.release.value = 0.16;
+
+  gate.gain.value = 0;
+
+  source.connect(analyser);
+  source.connect(highPass);
+  highPass.connect(compressor);
+  compressor.connect(gate);
+  gate.connect(destination);
+
+  const samples = new Uint8Array(analyser.fftSize);
+  let open = false;
+  let holdFrames = 0;
+
+  state.gateTimer = setInterval(() => {
+    analyser.getByteTimeDomainData(samples);
+    let sum = 0;
+    for (const sample of samples) {
+      const centered = (sample - 128) / 128;
+      sum += centered * centered;
+    }
+
+    const rms = Math.sqrt(sum / samples.length);
+    state.micLevel = rms;
+    const threshold = Number(state.audio.gateThreshold || 32) / 1000;
+    const openThreshold = threshold;
+    const closeThreshold = threshold * 0.62;
+
+    if (rms > openThreshold) {
+      open = true;
+      holdFrames = state.audio.noiseLevel === "strong" ? 8 : 12;
+    } else if (rms < closeThreshold) {
+      holdFrames -= 1;
+      if (holdFrames <= 0) open = false;
+    }
+
+    const now = context.currentTime;
+    const targetGain = open ? 1 : 0.025;
+    gate.gain.cancelScheduledValues(now);
+    gate.gain.setTargetAtTime(targetGain, now, open ? 0.012 : 0.055);
+  }, 24);
+
+  state.audioContext = context;
+  state.audioNodes = { source, analyser, highPass, compressor, gate, destination };
+  return destination.stream;
+}
+
+function stopMicProcessing() {
+  if (state.gateTimer) {
+    clearInterval(state.gateTimer);
+    state.gateTimer = null;
+  }
+
+  if (state.audioNodes) {
+    for (const node of Object.values(state.audioNodes)) {
+      try {
+        node.disconnect?.();
+      } catch {}
+    }
+    state.audioNodes = null;
+  }
+
+  if (state.audioContext) {
+    state.audioContext.close().catch(() => {});
+    state.audioContext = null;
+  }
+}
+
 function leaveVoice(sendToServer = true) {
   if (sendToServer) send("leaveVoice", {});
   cleanupVoice(true);
@@ -431,6 +571,15 @@ function cleanupVoice(stopTracks) {
   if (stopTracks && state.localStream) {
     for (const track of state.localStream.getTracks()) track.stop();
     state.localStream = null;
+  }
+
+  if (stopTracks && state.rawMicStream) {
+    for (const track of state.rawMicStream.getTracks()) track.stop();
+    state.rawMicStream = null;
+  }
+
+  if (stopTracks) {
+    stopMicProcessing();
   }
 
   if (stopTracks) {
@@ -599,7 +748,7 @@ function applyVideoSenderSettings(targetPc) {
 
 async function startScreenShare() {
   if (!state.currentVoice) {
-    systemMessage("Yayin acmak icin once ses kanalina gir.");
+    systemMessage("Yayın açmak için önce bir ses kanalına gir.");
     return;
   }
 
@@ -624,9 +773,9 @@ async function startScreenShare() {
     }
 
     renderVoiceControls();
-    systemMessage("Yayin basladi.");
+    systemMessage("Yayın başladı.");
   } catch {
-    systemMessage("Yayin izni alinamadi.");
+    systemMessage("Yayın izni alınamadı. Programı yeni sürümle tekrar kurduğundan emin ol.");
   }
 }
 
@@ -663,8 +812,8 @@ async function refreshDevices() {
 
   try {
     const devices = await navigator.mediaDevices.enumerateDevices();
-    fillDeviceSelect(inputDevice, devices.filter(device => device.kind === "audioinput"), "Varsayilan mikrofon", state.audio.inputDeviceId);
-    fillDeviceSelect(outputDevice, devices.filter(device => device.kind === "audiooutput"), "Varsayilan hoparlor", state.audio.outputDeviceId);
+    fillDeviceSelect(inputDevice, devices.filter(device => device.kind === "audioinput"), "Varsayılan mikrofon", state.audio.inputDeviceId);
+    fillDeviceSelect(outputDevice, devices.filter(device => device.kind === "audiooutput"), "Varsayılan hoparlör", state.audio.outputDeviceId);
   } catch {}
 }
 
@@ -696,6 +845,9 @@ function renderAudioSettings() {
   noiseSuppression.checked = state.audio.noiseSuppression;
   autoGainControl.checked = state.audio.autoGainControl;
   noiseLevel.value = state.audio.noiseLevel;
+  noiseGate.checked = state.audio.noiseGate;
+  gateThresholdRange.value = state.audio.gateThreshold;
+  gateThresholdLabel.textContent = `${state.audio.gateThreshold}%`;
 }
 
 function saveAudioSettings() {
@@ -736,8 +888,8 @@ function startStats() {
 
     const peerCount = state.peers.size;
     audioStats.textContent = peerCount
-      ? `${peerCount} baglanti | giden ${sendKbps} kbps | gelen ${receiveKbps} kbps`
-      : "Kanaldasiniz";
+      ? `${peerCount} bağlantı | giden ${sendKbps} kbps | gelen ${receiveKbps} kbps | mikrofon ${Math.round(state.micLevel * 1000)}`
+      : `Kanaldasın | mikrofon ${Math.round(state.micLevel * 1000)}`;
   }, 2000);
 }
 
@@ -752,7 +904,7 @@ function renderHistory(history) {
   if (!history.length) {
     const empty = document.createElement("div");
     empty.className = "empty";
-    empty.textContent = "Henuz mesaj yok. Ilk mesaji sen at.";
+    empty.textContent = "Henüz mesaj yok. İlk mesajı sen at.";
     chatLog.append(empty);
     return;
   }
@@ -774,7 +926,7 @@ function appendMessage(message) {
         <time>${formatTime(message.time)}</time>
       </header>
       ${message.text ? `<p>${escapeHtml(message.text)}</p>` : ""}
-      ${message.kind === "image" && message.image ? `<img class="message-image" src="${message.image}" alt="Paylasilan resim">` : ""}
+      ${message.kind === "image" && message.image ? `<img class="message-image" src="${message.image}" alt="Paylaşılan resim">` : ""}
     </div>
   `;
   chatLog.append(row);
@@ -782,6 +934,11 @@ function appendMessage(message) {
 }
 
 function systemMessage(text) {
+  const now = Date.now();
+  if (text === lastSystemMessage && now - lastSystemMessageAt < 5000) return;
+  lastSystemMessage = text;
+  lastSystemMessageAt = now;
+
   appendMessage({
     name: "Sistem",
     text,
@@ -799,7 +956,7 @@ function renderUsers() {
       <div class="avatar">${avatarMarkup(user.name, user.avatar)}</div>
       <div>
         <strong>${escapeHtml(user.name)}</strong>
-        <span>${user.channel ? voiceName(user.channel) : "Online"}</span>
+        <span>${user.channel ? voiceName(user.channel) : "Çevrimiçi"}</span>
       </div>
     `;
     userList.append(item);
@@ -812,6 +969,21 @@ function renderChannels() {
     const button = document.querySelector(`[data-voice-channel="${channel}"]`);
     button.classList.toggle("active", state.currentVoice === channel);
     $(`#${channel}Count`).textContent = users.length;
+    renderVoiceMembers(channel, users);
+  }
+}
+
+function renderVoiceMembers(channel, users) {
+  const container = $(`#${channel}Members`);
+  container.innerHTML = "";
+  for (const user of users) {
+    const item = document.createElement("div");
+    item.className = "voice-member";
+    item.innerHTML = `
+      <span class="mini-avatar">${avatarMarkup(user.name, user.avatar)}</span>
+      <span>${escapeHtml(user.name)}</span>
+    `;
+    container.append(item);
   }
 }
 
@@ -820,19 +992,19 @@ function renderVoiceControls() {
 
   voiceBar.classList.toggle("hidden", !inVoice);
   muteButton.disabled = !inVoice;
-  screenButton.disabled = !inVoice;
+  screenButton.disabled = false;
   leaveVoiceButton.disabled = !inVoice;
   muteButton.classList.toggle("danger", state.muted);
   screenButton.classList.toggle("live", Boolean(state.screenStream));
-  muteIcon.textContent = state.muted ? "Muted" : "Mic";
-  screenIcon.textContent = state.screenStream ? "Live" : "Cast";
-  voiceStatus.textContent = inVoice ? voiceName(state.currentVoice) : "Seste degil";
+  muteIcon.textContent = state.muted ? "Kapalı" : "Mik";
+  screenIcon.textContent = state.screenStream ? "Canlı" : "Yayın";
+  voiceStatus.textContent = inVoice ? voiceName(state.currentVoice) : "Seste değil";
 
   if (!inVoice) return;
 
   const people = state.channels[state.currentVoice] || [];
   currentVoiceName.textContent = voiceName(state.currentVoice);
-  currentVoicePeople.textContent = `${people.length || 1} kisi bagli`;
+  currentVoicePeople.textContent = `${people.length || 1} kişi bağlı`;
   speakingList.innerHTML = "";
 
   for (const user of people) {
@@ -910,12 +1082,12 @@ async function compressImage(file, maxSize, quality) {
 }
 
 function renderLocalVideo(stream) {
-  renderVideoTile("local", "Senin yayinin", stream, true);
+  renderVideoTile("local", "Senin yayının", stream, true);
 }
 
 function renderRemoteVideo(peerId, stream) {
   const user = state.users.find(item => item.id === peerId);
-  renderVideoTile(peerId, `${user?.name || "Arkadas"} yayini`, stream, false);
+  renderVideoTile(peerId, `${user?.name || "Arkadaş"} yayını`, stream, false);
 }
 
 function renderVideoTile(id, label, stream, muted) {
@@ -945,7 +1117,7 @@ function removeVideoTile(id) {
 function updateStageStatus() {
   const count = videoGrid.children.length;
   stage.classList.toggle("hidden", count === 0);
-  stageStatus.textContent = count ? `${count} yayin aktif` : "Aktif yayin yok";
+  stageStatus.textContent = count ? `${count} yayın aktif` : "Aktif yayın yok";
 }
 
 function formatTime(time) {

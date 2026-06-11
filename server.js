@@ -173,7 +173,6 @@ function handleSocketData(client, chunk) {
     try {
       message = JSON.parse(frame.payload.toString("utf8"));
     } catch {
-      send(client, "error", { message: "Gecersiz mesaj." });
       continue;
     }
 

@@ -13,7 +13,10 @@ Arkadas grubu icin kucuk ses ve chat uygulamasi.
 - Mikrofon ve hoparlor secimi
 - Opus bitrate ayari
 - Echo cancellation, noise suppression ve auto gain ayarlari
+- Sessizlik kesici ve mikrofon esigi
 - Canli ses baglanti istatistikleri
+- Ekran yayini
+- Profil fotografi ve resim paylasma
 - WebRTC ile sesli konusma
 - Render uyumlu Node sunucusu
 - Tarayicidan uygulama gibi kurulabilen PWA
