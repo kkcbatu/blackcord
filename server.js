@@ -5,6 +5,8 @@ const path = require("path");
 
 const PORT = Number(process.env.PORT || 3000);
 const PUBLIC_DIR = path.join(__dirname, "public");
+const MAX_PAYLOAD_SIZE = 64 * 1024;
+const MAX_CHAT_HISTORY = 80;
 
 const clients = new Map();
 const channels = {
@@ -18,20 +20,29 @@ const mimeTypes = {
   ".css": "text/css; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
-  ".svg": "image/svg+xml",
+  ".svg": "image/svg+xml; charset=utf-8",
   ".png": "image/png",
   ".ico": "image/x-icon"
 };
 
 const server = http.createServer((req, res) => {
-  const requestUrl = new URL(req.url, `http://${req.headers.host}`);
-  let filePath = path.normalize(decodeURIComponent(requestUrl.pathname));
+  const requestUrl = new URL(req.url, `http://${req.headers.host || "localhost"}`);
 
+  if (requestUrl.pathname === "/health") {
+    writeJson(res, 200, {
+      ok: true,
+      users: clients.size,
+      time: Date.now()
+    });
+    return;
+  }
+
+  let filePath = path.normalize(decodeURIComponent(requestUrl.pathname));
   if (filePath === "/" || filePath === "\\") {
     filePath = "/index.html";
   }
 
-  const absolutePath = path.join(PUBLIC_DIR, filePath);
+  const absolutePath = path.resolve(PUBLIC_DIR, `.${filePath}`);
   if (!absolutePath.startsWith(PUBLIC_DIR)) {
     res.writeHead(403);
     res.end("Forbidden");
@@ -40,8 +51,7 @@ const server = http.createServer((req, res) => {
 
   fs.readFile(absolutePath, (error, data) => {
     if (error) {
-      res.writeHead(404);
-      res.end("Not found");
+      serveIndex(res);
       return;
     }
 
@@ -88,6 +98,7 @@ server.on("upgrade", (req, socket) => {
     buffer: Buffer.alloc(0),
     alive: true
   };
+
   clients.set(id, client);
 
   send(client, "hello", {
@@ -97,7 +108,13 @@ server.on("upgrade", (req, socket) => {
   });
   broadcastState();
 
-  socket.on("data", chunk => handleSocketData(client, chunk));
+  socket.on("data", chunk => {
+    try {
+      handleSocketData(client, chunk);
+    } catch {
+      removeClient(client);
+    }
+  });
   socket.on("close", () => removeClient(client));
   socket.on("error", () => removeClient(client));
 });
@@ -116,7 +133,7 @@ setInterval(() => {
       removeClient(client);
     }
   }
-}, 30000);
+}, 30000).unref();
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`Black Cord running on http://localhost:${PORT}`);
@@ -137,6 +154,7 @@ function handleSocketData(client, chunk) {
     }
 
     if (frame.opcode === 0x9) {
+      client.alive = true;
       client.socket.write(Buffer.from([0x8a, 0x00]));
       continue;
     }
@@ -148,12 +166,15 @@ function handleSocketData(client, chunk) {
 
     if (frame.opcode !== 0x1) continue;
 
+    let message;
     try {
-      const message = JSON.parse(frame.payload.toString("utf8"));
-      handleMessage(client, message);
+      message = JSON.parse(frame.payload.toString("utf8"));
     } catch {
-      send(client, "error", { message: "Geçersiz mesaj." });
+      send(client, "error", { message: "Gecersiz mesaj." });
+      continue;
     }
+
+    handleMessage(client, message);
   }
 }
 
@@ -177,6 +198,10 @@ function parseFrame(buffer) {
     offset += 8;
   }
 
+  if (payloadLength > MAX_PAYLOAD_SIZE) {
+    throw new Error("Payload too large");
+  }
+
   const maskLength = masked ? 4 : 0;
   const totalLength = offset + maskLength + payloadLength;
   if (buffer.length < totalLength) return null;
@@ -191,6 +216,8 @@ function parseFrame(buffer) {
 }
 
 function handleMessage(client, message) {
+  if (!message || typeof message !== "object") return;
+
   switch (message.type) {
     case "join":
       client.name = cleanName(message.name);
@@ -199,7 +226,7 @@ function handleMessage(client, message) {
       break;
 
     case "chat":
-      if (!message.text || typeof message.text !== "string") return;
+      if (typeof message.text !== "string") return;
       addChatMessage(client, message.text);
       break;
 
@@ -216,7 +243,7 @@ function handleMessage(client, message) {
       break;
 
     default:
-      send(client, "error", { message: "Bilinmeyen işlem." });
+      send(client, "error", { message: "Bilinmeyen islem." });
   }
 }
 
@@ -232,19 +259,20 @@ function addChatMessage(client, text) {
     id: crypto.randomUUID(),
     userId: client.id,
     name: client.name,
-    text: String(text).trim().slice(0, 600),
+    text: String(text).replace(/\s+/g, " ").trim().slice(0, 600),
     time: Date.now()
   };
 
   if (!item.text) return;
 
   chatHistory.push(item);
-  while (chatHistory.length > 80) chatHistory.shift();
+  while (chatHistory.length > MAX_CHAT_HISTORY) chatHistory.shift();
   broadcast("chat", item);
 }
 
 function joinVoice(client, channel) {
   if (!channels[channel]) return;
+
   const previousChannel = client.channel;
   leaveVoice(client, false);
 
@@ -257,21 +285,23 @@ function joinVoice(client, channel) {
     .filter(Boolean);
 
   send(client, "voicePeers", { channel, peers });
+
   for (const peerId of channels[channel]) {
     if (peerId !== client.id) {
       send(clients.get(peerId), "peerJoined", { channel, peer: getPublicUser(client) });
     }
   }
 
-  broadcastState();
-
   if (previousChannel && previousChannel !== channel) {
     broadcastToChannel(previousChannel, "peerLeft", { peerId: client.id });
   }
+
+  broadcastState();
 }
 
 function leaveVoice(client, announce = true) {
   if (!client.channel || !channels[client.channel]) return;
+
   const channel = client.channel;
   channels[channel].delete(client.id);
   client.channel = null;
@@ -284,7 +314,7 @@ function leaveVoice(client, announce = true) {
 
 function relaySignal(client, message) {
   const target = clients.get(message.to);
-  if (!target || target.channel !== client.channel) return;
+  if (!target || target.channel !== client.channel || !message.signal) return;
 
   send(target, "signal", {
     from: client.id,
@@ -347,6 +377,7 @@ function broadcastToChannel(channel, type, payload) {
 
 function send(client, type, payload) {
   if (!client?.socket?.writable) return;
+
   const data = Buffer.from(JSON.stringify({ type, ...payload }), "utf8");
   const header = createFrameHeader(data.length);
   client.socket.write(Buffer.concat([header, data]));
@@ -371,4 +402,28 @@ function createFrameHeader(length) {
   header.writeUInt32BE(0, 2);
   header.writeUInt32BE(length, 6);
   return header;
+}
+
+function serveIndex(res) {
+  fs.readFile(path.join(PUBLIC_DIR, "index.html"), (error, data) => {
+    if (error) {
+      res.writeHead(404);
+      res.end("Not found");
+      return;
+    }
+
+    res.writeHead(200, {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store"
+    });
+    res.end(data);
+  });
+}
+
+function writeJson(res, status, data) {
+  res.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store"
+  });
+  res.end(JSON.stringify(data));
 }

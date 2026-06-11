@@ -264,10 +264,6 @@ button:disabled {
   background: rgba(45, 212, 191, 0.08);
 }
 
-.hidden {
-  display: none;
-}
-
 .speaking-list {
   display: flex;
   flex-wrap: wrap;
@@ -407,6 +403,11 @@ button:disabled {
   color: var(--muted);
   font-size: 13px;
   font-weight: 800;
+}
+
+.hidden,
+.login.hidden {
+  display: none;
 }
 
 @media (max-width: 820px) {

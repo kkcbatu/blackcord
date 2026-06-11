@@ -7,6 +7,7 @@ const state = {
   currentVoice: null,
   localStream: null,
   muted: false,
+  reconnectTimer: null,
   peers: new Map()
 };
 
@@ -16,6 +17,7 @@ const iceServers = [
 ];
 
 const $ = selector => document.querySelector(selector);
+
 const chatLog = $("#chatLog");
 const connectionStatus = $("#connectionStatus");
 const login = $("#login");
@@ -36,8 +38,11 @@ const muteIcon = $("#muteIcon");
 const leaveVoiceButton = $("#leaveVoiceButton");
 
 nameInput.value = state.myName;
+profileName.textContent = state.myName || "Misafir";
+profileAvatar.textContent = initials(state.myName);
 
 connect();
+registerServiceWorker();
 
 if (state.myName) {
   showApp();
@@ -45,21 +50,30 @@ if (state.myName) {
 
 loginForm.addEventListener("submit", event => {
   event.preventDefault();
+
   const name = nameInput.value.trim().slice(0, 24);
-  if (!name) return;
+  if (!name) {
+    nameInput.focus();
+    return;
+  }
 
   state.myName = name;
   localStorage.setItem("black-cord-name", name);
-  profileName.textContent = name;
-  profileAvatar.textContent = initials(name);
   showApp();
   send("join", { name });
 });
 
 chatForm.addEventListener("submit", event => {
   event.preventDefault();
+
   const text = messageInput.value.trim();
   if (!text) return;
+
+  if (!isConnected()) {
+    systemMessage("Baglanti kurulunca tekrar dene.");
+    return;
+  }
+
   send("chat", { text });
   messageInput.value = "";
 });
@@ -70,6 +84,7 @@ document.querySelectorAll("[data-voice-channel]").forEach(button => {
 
 muteButton.addEventListener("click", () => {
   if (!state.localStream) return;
+
   state.muted = !state.muted;
   for (const track of state.localStream.getAudioTracks()) {
     track.enabled = !state.muted;
@@ -79,24 +94,41 @@ muteButton.addEventListener("click", () => {
 
 leaveVoiceButton.addEventListener("click", () => leaveVoice());
 
+window.addEventListener("beforeunload", () => {
+  if (state.socket?.readyState === WebSocket.OPEN) {
+    send("leaveVoice", {});
+    state.socket.close();
+  }
+});
+
 function connect() {
+  clearTimeout(state.reconnectTimer);
+
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
   state.socket = new WebSocket(`${protocol}//${location.host}`);
+  connectionStatus.textContent = "Baglaniyor...";
 
   state.socket.addEventListener("open", () => {
-    connectionStatus.textContent = "Bağlandı";
+    connectionStatus.textContent = "Baglandi";
     if (state.myName) send("join", { name: state.myName });
   });
 
   state.socket.addEventListener("close", () => {
     connectionStatus.textContent = "Koptu, tekrar deneniyor";
-    cleanupVoice(false);
-    setTimeout(connect, 1400);
+    cleanupVoice(true);
+    state.reconnectTimer = setTimeout(connect, 1500);
+  });
+
+  state.socket.addEventListener("error", () => {
+    connectionStatus.textContent = "Baglanti hatasi";
   });
 
   state.socket.addEventListener("message", event => {
-    const message = JSON.parse(event.data);
-    handleServerMessage(message);
+    try {
+      handleServerMessage(JSON.parse(event.data));
+    } catch {
+      systemMessage("Sunucudan gecersiz veri geldi.");
+    }
   });
 }
 
@@ -135,7 +167,7 @@ function handleServerMessage(message) {
       break;
 
     case "peerJoined":
-      if (message.channel === state.currentVoice) {
+      if (message.channel === state.currentVoice && message.peer?.id) {
         createPeer(message.peer.id, false);
       }
       break;
@@ -147,11 +179,25 @@ function handleServerMessage(message) {
     case "signal":
       handleSignal(message.from, message.signal);
       break;
+
+    case "error":
+      systemMessage(message.message || "Bir hata olustu.");
+      break;
   }
 }
 
 async function joinVoice(channel) {
   if (state.currentVoice === channel) return;
+
+  if (!isConnected()) {
+    systemMessage("Ses kanalina girmek icin sunucu baglantisi gerekli.");
+    return;
+  }
+
+  if (!navigator.mediaDevices?.getUserMedia) {
+    systemMessage("Bu tarayici mikrofonu desteklemiyor.");
+    return;
+  }
 
   try {
     if (!state.localStream) {
@@ -170,7 +216,7 @@ async function joinVoice(channel) {
     send("joinVoice", { channel });
     renderVoiceControls();
   } catch {
-    alert("Mikrofon izni alınamadı. Tarayıcı/Windows mikrofon iznini kontrol et.");
+    systemMessage("Mikrofon izni alinamadi. Tarayici veya Windows mikrofon iznini kontrol et.");
   }
 }
 
@@ -181,21 +227,26 @@ function leaveVoice(sendToServer = true) {
 
 function cleanupVoice(stopTracks) {
   cleanupPeers();
+
   if (stopTracks && state.localStream) {
     for (const track of state.localStream.getTracks()) track.stop();
     state.localStream = null;
   }
+
   state.currentVoice = null;
   state.muted = false;
   renderVoiceControls();
 }
 
 function cleanupPeers() {
-  for (const peerId of [...state.peers.keys()]) closePeer(peerId);
+  for (const peerId of [...state.peers.keys()]) {
+    closePeer(peerId);
+  }
 }
 
 function createPeer(peerId, shouldOffer) {
-  if (!state.localStream || state.peers.has(peerId)) return state.peers.get(peerId)?.pc;
+  if (!state.localStream) return null;
+  if (state.peers.has(peerId)) return state.peers.get(peerId).pc;
 
   const pc = new RTCPeerConnection({ iceServers });
   const audio = new Audio();
@@ -216,31 +267,46 @@ function createPeer(peerId, shouldOffer) {
   };
 
   pc.onconnectionstatechange = () => {
-    if (["failed", "closed", "disconnected"].includes(pc.connectionState)) {
+    if (pc.connectionState === "failed" || pc.connectionState === "closed") {
       closePeer(peerId);
     }
   };
 
-  state.peers.set(peerId, { pc, audio });
+  state.peers.set(peerId, { pc, audio, candidates: [] });
   renderVoiceControls();
 
   if (shouldOffer) {
-    pc.createOffer()
-      .then(offer => pc.setLocalDescription(offer))
-      .then(() => send("signal", { to: peerId, signal: { description: pc.localDescription } }))
-      .catch(() => closePeer(peerId));
+    createOffer(peerId, pc);
   }
 
   return pc;
 }
 
+async function createOffer(peerId, pc) {
+  try {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    send("signal", { to: peerId, signal: { description: pc.localDescription } });
+  } catch {
+    closePeer(peerId);
+  }
+}
+
 async function handleSignal(peerId, signal) {
+  if (!peerId || !signal) return;
+
   const pc = createPeer(peerId, false);
-  if (!pc) return;
+  const peer = state.peers.get(peerId);
+  if (!pc || !peer) return;
 
   try {
     if (signal.description) {
       await pc.setRemoteDescription(signal.description);
+
+      while (peer.candidates.length) {
+        await pc.addIceCandidate(peer.candidates.shift());
+      }
+
       if (signal.description.type === "offer") {
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
@@ -249,7 +315,11 @@ async function handleSignal(peerId, signal) {
     }
 
     if (signal.candidate) {
-      await pc.addIceCandidate(signal.candidate);
+      if (pc.remoteDescription) {
+        await pc.addIceCandidate(signal.candidate);
+      } else {
+        peer.candidates.push(signal.candidate);
+      }
     }
   } catch {
     closePeer(peerId);
@@ -259,6 +329,7 @@ async function handleSignal(peerId, signal) {
 function closePeer(peerId) {
   const peer = state.peers.get(peerId);
   if (!peer) return;
+
   peer.pc.close();
   peer.audio.srcObject = null;
   state.peers.delete(peerId);
@@ -267,13 +338,15 @@ function closePeer(peerId) {
 
 function renderHistory(history) {
   chatLog.innerHTML = "";
+
   if (!history.length) {
     const empty = document.createElement("div");
     empty.className = "empty";
-    empty.textContent = "Henüz mesaj yok. İlk mesajı sen at.";
+    empty.textContent = "Henuz mesaj yok. Ilk mesaji sen at.";
     chatLog.append(empty);
     return;
   }
+
   history.forEach(appendMessage);
 }
 
@@ -297,8 +370,17 @@ function appendMessage(message) {
   chatLog.scrollTop = chatLog.scrollHeight;
 }
 
+function systemMessage(text) {
+  appendMessage({
+    name: "Sistem",
+    text,
+    time: Date.now()
+  });
+}
+
 function renderUsers() {
   userList.innerHTML = "";
+
   for (const user of state.users) {
     const item = document.createElement("div");
     item.className = "user";
@@ -324,18 +406,19 @@ function renderChannels() {
 
 function renderVoiceControls() {
   const inVoice = Boolean(state.currentVoice);
+
   voiceBar.classList.toggle("hidden", !inVoice);
   muteButton.disabled = !inVoice;
   leaveVoiceButton.disabled = !inVoice;
   muteButton.classList.toggle("danger", state.muted);
   muteIcon.textContent = state.muted ? "Muted" : "Mic";
-  voiceStatus.textContent = inVoice ? voiceName(state.currentVoice) : "Seste değil";
+  voiceStatus.textContent = inVoice ? voiceName(state.currentVoice) : "Seste degil";
 
   if (!inVoice) return;
 
   const people = state.channels[state.currentVoice] || [];
   currentVoiceName.textContent = voiceName(state.currentVoice);
-  currentVoicePeople.textContent = `${people.length || 1} kişi bağlı`;
+  currentVoicePeople.textContent = `${people.length || 1} kisi bagli`;
   speakingList.innerHTML = "";
 
   for (const user of people) {
@@ -354,8 +437,14 @@ function showApp() {
 }
 
 function send(type, payload) {
-  if (!state.socket || state.socket.readyState !== WebSocket.OPEN) return;
+  if (!isConnected()) return false;
+
   state.socket.send(JSON.stringify({ type, ...payload }));
+  return true;
+}
+
+function isConnected() {
+  return state.socket?.readyState === WebSocket.OPEN;
 }
 
 function voiceName(channel) {
@@ -385,4 +474,10 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+function registerServiceWorker() {
+  if ("serviceWorker" in navigator && location.protocol === "https:") {
+    navigator.serviceWorker.register("/sw.js").catch(() => {});
+  }
 }

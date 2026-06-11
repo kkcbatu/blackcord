@@ -1,10 +1,40 @@
 # Black Cord
 
-Arkadaş grubu için küçük ses ve chat uygulaması. Dış paket kullanmaz; tek Node sunucusu statik uygulamayı ve WebSocket sinyalini servis eder.
+Arkadas grubu icin kucuk ses ve chat uygulamasi.
 
-## Çalıştırma
+## Ozellikler
 
-Windows'ta çift tıkla:
+- Isim yazip direkt giris
+- Tek chat kanali
+- Iki ses kanali
+- Mikrofon kapat/ac
+- Sesten cik
+- WebRTC ile sesli konusma
+- Render uyumlu Node sunucusu
+- Tarayicidan uygulama gibi kurulabilen PWA
+
+## Render ayarlari
+
+Render'da `New Web Service` sec ve GitHub reposunu bagla.
+
+```text
+Runtime: Node
+Build Command: npm install
+Start Command: node server.js
+Instance Type: Free
+```
+
+Deploy bitince Render sana su sekilde bir link verir:
+
+```text
+https://black-cord.onrender.com
+```
+
+Sen ve arkadaslarin bu linke girip isim yazarak kullanabilirsiniz.
+
+## Lokal calistirma
+
+Windows'ta cift tikla:
 
 ```text
 start-server.bat
@@ -16,31 +46,14 @@ Ya da terminalden:
 node server.js
 ```
 
-Sonra tarayıcıdan aç:
+Sonra ac:
 
 ```text
 http://localhost:3000
 ```
 
-Aynı ağdaki arkadaşların bağlanacaksa Windows güvenlik duvarında Node'a izin ver ve kendi yerel IP adresini paylaş:
+## Onemli not
 
-```text
-http://SENIN-IP-ADRESIN:3000
-```
+Render Free servisleri bos kalinca uykuya alabilir. Ilk acilista 30-60 saniye bekletebilir.
 
-İnternet üzerinden kullanmak için uygulamayı bir VPS'e koyup domain + HTTPS ile yayınla. Mikrofon izni için tarayıcılar `localhost` dışında genelde HTTPS ister.
-
-Arkadaşların siteyi açtıktan sonra tarayıcı menüsünden uygulamayı masaüstüne kurabilir. Chrome/Edge'de adres çubuğunda kurulum simgesi çıkar veya menüde "Uygulamayı yükle" seçeneği görünür.
-
-## Özellikler
-
-- İsmini yazıp direkt giriş
-- Tek chat kanalı
-- İki ses kanalı
-- Mikrofon kapat/aç
-- Sesten çık
-- Küçük grup için WebRTC ses bağlantısı
-
-## Not
-
-Ses bağlantısı direkt WebRTC ile kurulur. Bazı modem/firewall durumlarında TURN sunucusu gerekebilir; küçük arkadaş gruplarında çoğu zaman STUN ile çalışır.
+Ses WebRTC ile direkt baglanmaya calisir. Bazi modem/firewall durumlarinda ses baglanmazsa TURN sunucusu gerekir. Render uzerinde TURN kurmak uygun degildir; o durumda Oracle Cloud/VPS daha iyi olur.
