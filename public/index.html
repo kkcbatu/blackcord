@@ -16,7 +16,7 @@
           <div class="mark">BC</div>
           <div>
             <strong>Black Cord</strong>
-            <span id="connectionStatus">Bağlanıyor...</span>
+            <span id="connectionStatus">Baglaniyor...</span>
           </div>
         </div>
 
@@ -48,11 +48,14 @@
         </section>
 
         <div class="profile">
-          <div class="avatar" id="profileAvatar">?</div>
+          <button class="avatar profile-avatar-button" id="avatarButton" type="button" title="Profil fotografi sec">
+            <span id="profileAvatar">?</span>
+          </button>
           <div>
             <strong id="profileName">Misafir</strong>
-            <span id="voiceStatus">Seste değil</span>
+            <span id="voiceStatus">Seste degil</span>
           </div>
+          <input id="avatarInput" class="file-input" type="file" accept="image/*">
         </div>
       </aside>
 
@@ -63,26 +66,105 @@
             <p>Tek kanal, hizli mesaj, iki ses odasi.</p>
           </div>
           <div class="actions">
-            <button id="muteButton" class="icon-button" type="button" title="Mikrofonu kapat/aç" disabled>
+            <button id="settingsButton" class="icon-button" type="button" title="Ses ayarlari">
+              <span>EQ</span>
+            </button>
+            <button id="screenButton" class="icon-button" type="button" title="Yayin ac/kapat" disabled>
+              <span id="screenIcon">Cast</span>
+            </button>
+            <button id="muteButton" class="icon-button" type="button" title="Mikrofonu kapat/ac" disabled>
               <span id="muteIcon">Mic</span>
             </button>
-            <button id="leaveVoiceButton" class="ghost-button" type="button" disabled>Sesten çık</button>
+            <button id="leaveVoiceButton" class="ghost-button" type="button" disabled>Sesten cik</button>
           </div>
         </header>
 
         <div id="voiceBar" class="voice-bar hidden">
           <div>
             <strong id="currentVoiceName">Ses</strong>
-            <span id="currentVoicePeople">Bağlanıyor...</span>
+            <span id="currentVoicePeople">Baglaniyor...</span>
           </div>
           <div id="speakingList" class="speaking-list"></div>
         </div>
 
+        <section id="stage" class="stage hidden">
+          <div class="stage-head">
+            <div>
+              <h2>Yayin</h2>
+              <p id="stageStatus">Aktif yayin yok</p>
+            </div>
+          </div>
+          <div id="videoGrid" class="video-grid"></div>
+        </section>
+
+        <section id="settingsPanel" class="settings-panel hidden" aria-label="Ses ayarlari">
+          <div class="settings-head">
+            <div>
+              <h2>Ses Ayarlari</h2>
+              <p id="audioStats">Hazir</p>
+            </div>
+            <button id="closeSettingsButton" class="icon-button" type="button" title="Kapat">X</button>
+          </div>
+
+          <div class="settings-grid">
+            <label>
+              Kalite
+              <select id="qualityPreset">
+                <option value="voice">Net konusma</option>
+                <option value="balanced">Dengeli</option>
+                <option value="studio">Yuksek kalite</option>
+              </select>
+            </label>
+
+            <label>
+              Mikrofon
+              <select id="inputDevice"></select>
+            </label>
+
+            <label>
+              Hoparlor
+              <select id="outputDevice"></select>
+            </label>
+
+            <label>
+              Bitrate
+              <input id="bitrateRange" type="range" min="24000" max="128000" step="8000">
+              <span id="bitrateLabel" class="setting-value">64 kbps</span>
+            </label>
+
+            <label>
+              Gurultu azaltma
+              <select id="noiseLevel">
+                <option value="off">Kapali</option>
+                <option value="standard">Standart</option>
+                <option value="strong">Guclu</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="toggle-grid">
+            <label class="toggle">
+              <input id="echoCancellation" type="checkbox">
+              <span>Echo cancellation</span>
+            </label>
+            <label class="toggle">
+              <input id="noiseSuppression" type="checkbox">
+              <span>Noise suppression</span>
+            </label>
+            <label class="toggle">
+              <input id="autoGainControl" type="checkbox">
+              <span>Auto gain</span>
+            </label>
+          </div>
+        </section>
+
         <div id="chatLog" class="chat-log"></div>
 
         <form id="chatForm" class="composer">
+          <button id="imageButton" class="icon-button" type="button" title="Resim ekle">Img</button>
           <input id="messageInput" type="text" maxlength="600" autocomplete="off" placeholder="Mesaj yaz...">
-          <button type="submit">Gönder</button>
+          <button type="submit">Gonder</button>
+          <input id="imageInput" class="file-input" type="file" accept="image/*">
         </form>
       </section>
     </main>
@@ -91,12 +173,12 @@
       <form id="loginForm" class="login-card">
         <div class="login-mark">BC</div>
         <h1>Black Cord</h1>
-        <p>İsmini yaz, direkt içeri gir.</p>
+        <p>Ismini yaz, direkt iceri gir.</p>
         <label>
-          İsim
+          Isim
           <input id="nameInput" type="text" maxlength="24" autocomplete="nickname" placeholder="Batu">
         </label>
-        <button type="submit">Giriş yap</button>
+        <button type="submit">Giris yap</button>
       </form>
     </section>
 

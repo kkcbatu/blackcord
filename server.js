@@ -5,8 +5,10 @@ const path = require("path");
 
 const PORT = Number(process.env.PORT || 3000);
 const PUBLIC_DIR = path.join(__dirname, "public");
-const MAX_PAYLOAD_SIZE = 64 * 1024;
+const MAX_PAYLOAD_SIZE = 3 * 1024 * 1024;
 const MAX_CHAT_HISTORY = 80;
+const MAX_IMAGE_DATA_LENGTH = 2_200_000;
+const MAX_AVATAR_DATA_LENGTH = 180_000;
 
 const clients = new Map();
 const channels = {
@@ -96,7 +98,8 @@ server.on("upgrade", (req, socket) => {
     channel: null,
     socket,
     buffer: Buffer.alloc(0),
-    alive: true
+    alive: true,
+    avatar: ""
   };
 
   clients.set(id, client);
@@ -221,13 +224,24 @@ function handleMessage(client, message) {
   switch (message.type) {
     case "join":
       client.name = cleanName(message.name);
-      send(client, "joined", { id: client.id, name: client.name });
+      client.avatar = cleanImageData(message.avatar, MAX_AVATAR_DATA_LENGTH) || client.avatar;
+      send(client, "joined", { id: client.id, name: client.name, avatar: client.avatar });
+      broadcastState();
+      break;
+
+    case "profile":
+      client.name = cleanName(message.name || client.name);
+      client.avatar = cleanImageData(message.avatar, MAX_AVATAR_DATA_LENGTH) || "";
       broadcastState();
       break;
 
     case "chat":
       if (typeof message.text !== "string") return;
       addChatMessage(client, message.text);
+      break;
+
+    case "image":
+      addImageMessage(client, message);
       break;
 
     case "joinVoice":
@@ -257,13 +271,35 @@ function cleanName(name) {
 function addChatMessage(client, text) {
   const item = {
     id: crypto.randomUUID(),
+    kind: "text",
     userId: client.id,
     name: client.name,
+    avatar: client.avatar,
     text: String(text).replace(/\s+/g, " ").trim().slice(0, 600),
     time: Date.now()
   };
 
   if (!item.text) return;
+
+  chatHistory.push(item);
+  while (chatHistory.length > MAX_CHAT_HISTORY) chatHistory.shift();
+  broadcast("chat", item);
+}
+
+function addImageMessage(client, message) {
+  const image = cleanImageData(message.image, MAX_IMAGE_DATA_LENGTH);
+  if (!image) return;
+
+  const item = {
+    id: crypto.randomUUID(),
+    kind: "image",
+    userId: client.id,
+    name: client.name,
+    avatar: client.avatar,
+    text: String(message.text || "").replace(/\s+/g, " ").trim().slice(0, 240),
+    image,
+    time: Date.now()
+  };
 
   chatHistory.push(item);
   while (chatHistory.length > MAX_CHAT_HISTORY) chatHistory.shift();
@@ -359,8 +395,15 @@ function getPublicUser(client) {
   return {
     id: client.id,
     name: client.name,
-    channel: client.channel
+    channel: client.channel,
+    avatar: client.avatar || ""
   };
+}
+
+function cleanImageData(value, maxLength) {
+  if (typeof value !== "string" || value.length > maxLength) return "";
+  if (!/^data:image\/(png|jpeg|jpg|webp);base64,[a-z0-9+/=]+$/i.test(value)) return "";
+  return value;
 }
 
 function broadcast(type, payload) {

@@ -1,14 +1,55 @@
+const savedAudioSettings = JSON.parse(localStorage.getItem("black-cord-audio") || "{}");
+
+const defaultAudioSettings = {
+  preset: "balanced",
+  inputDeviceId: "",
+  outputDeviceId: "",
+  bitrate: 64000,
+  echoCancellation: true,
+  noiseSuppression: true,
+  autoGainControl: true,
+  noiseLevel: "standard"
+};
+
+const presetSettings = {
+  voice: {
+    bitrate: 40000,
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+    noiseLevel: "strong"
+  },
+  balanced: {
+    bitrate: 64000,
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+    noiseLevel: "standard"
+  },
+  studio: {
+    bitrate: 128000,
+    echoCancellation: false,
+    noiseSuppression: false,
+    autoGainControl: false,
+    noiseLevel: "off"
+  }
+};
+
 const state = {
   socket: null,
   myId: null,
   myName: localStorage.getItem("black-cord-name") || "",
+  avatar: localStorage.getItem("black-cord-avatar") || "",
   users: [],
   channels: { voice1: [], voice2: [] },
   currentVoice: null,
   localStream: null,
+  screenStream: null,
   muted: false,
   reconnectTimer: null,
-  peers: new Map()
+  statsTimer: null,
+  peers: new Map(),
+  audio: { ...defaultAudioSettings, ...savedAudioSettings }
 };
 
 const iceServers = [
@@ -28,6 +69,8 @@ const messageInput = $("#messageInput");
 const userList = $("#userList");
 const profileName = $("#profileName");
 const profileAvatar = $("#profileAvatar");
+const avatarButton = $("#avatarButton");
+const avatarInput = $("#avatarInput");
 const voiceStatus = $("#voiceStatus");
 const voiceBar = $("#voiceBar");
 const currentVoiceName = $("#currentVoiceName");
@@ -36,13 +79,35 @@ const speakingList = $("#speakingList");
 const muteButton = $("#muteButton");
 const muteIcon = $("#muteIcon");
 const leaveVoiceButton = $("#leaveVoiceButton");
+const screenButton = $("#screenButton");
+const screenIcon = $("#screenIcon");
+const settingsButton = $("#settingsButton");
+const closeSettingsButton = $("#closeSettingsButton");
+const settingsPanel = $("#settingsPanel");
+const qualityPreset = $("#qualityPreset");
+const inputDevice = $("#inputDevice");
+const outputDevice = $("#outputDevice");
+const bitrateRange = $("#bitrateRange");
+const bitrateLabel = $("#bitrateLabel");
+const echoCancellation = $("#echoCancellation");
+const noiseSuppression = $("#noiseSuppression");
+const autoGainControl = $("#autoGainControl");
+const audioStats = $("#audioStats");
+const noiseLevel = $("#noiseLevel");
+const stage = $("#stage");
+const stageStatus = $("#stageStatus");
+const videoGrid = $("#videoGrid");
+const imageButton = $("#imageButton");
+const imageInput = $("#imageInput");
 
 nameInput.value = state.myName;
 profileName.textContent = state.myName || "Misafir";
-profileAvatar.textContent = initials(state.myName);
+renderAvatar(profileAvatar, state.myName, state.avatar);
 
 connect();
 registerServiceWorker();
+renderAudioSettings();
+refreshDevices();
 
 if (state.myName) {
   showApp();
@@ -60,7 +125,7 @@ loginForm.addEventListener("submit", event => {
   state.myName = name;
   localStorage.setItem("black-cord-name", name);
   showApp();
-  send("join", { name });
+  send("join", { name, avatar: state.avatar });
 });
 
 chatForm.addEventListener("submit", event => {
@@ -78,8 +143,115 @@ chatForm.addEventListener("submit", event => {
   messageInput.value = "";
 });
 
+imageButton.addEventListener("click", () => imageInput.click());
+
+imageInput.addEventListener("change", async () => {
+  const file = imageInput.files?.[0];
+  imageInput.value = "";
+  if (!file) return;
+
+  if (!isConnected()) {
+    systemMessage("Resim gondermek icin baglanti gerekli.");
+    return;
+  }
+
+  try {
+    const image = await compressImage(file, 1400, 0.82);
+    send("image", {
+      text: messageInput.value.trim(),
+      image
+    });
+    messageInput.value = "";
+  } catch {
+    systemMessage("Resim hazirlanamadi. Daha kucuk bir dosya dene.");
+  }
+});
+
 document.querySelectorAll("[data-voice-channel]").forEach(button => {
   button.addEventListener("click", () => joinVoice(button.dataset.voiceChannel));
+});
+
+settingsButton.addEventListener("click", () => {
+  settingsPanel.classList.toggle("hidden");
+  refreshDevices();
+});
+
+closeSettingsButton.addEventListener("click", () => {
+  settingsPanel.classList.add("hidden");
+});
+
+avatarButton.addEventListener("click", () => avatarInput.click());
+
+avatarInput.addEventListener("change", async () => {
+  const file = avatarInput.files?.[0];
+  avatarInput.value = "";
+  if (!file) return;
+
+  try {
+    state.avatar = await compressImage(file, 256, 0.8);
+    localStorage.setItem("black-cord-avatar", state.avatar);
+    renderAvatar(profileAvatar, state.myName, state.avatar);
+    send("profile", { name: state.myName, avatar: state.avatar });
+  } catch {
+    systemMessage("Profil fotografi hazirlanamadi.");
+  }
+});
+
+qualityPreset.addEventListener("change", () => {
+  const preset = presetSettings[qualityPreset.value] || presetSettings.balanced;
+  state.audio = {
+    ...state.audio,
+    preset: qualityPreset.value,
+    ...preset
+  };
+  saveAudioSettings();
+  renderAudioSettings();
+  applyAudioChanges();
+});
+
+inputDevice.addEventListener("change", () => {
+  state.audio.inputDeviceId = inputDevice.value;
+  saveAudioSettings();
+  applyAudioChanges(true);
+});
+
+outputDevice.addEventListener("change", () => {
+  state.audio.outputDeviceId = outputDevice.value;
+  saveAudioSettings();
+  applyOutputDevice();
+});
+
+bitrateRange.addEventListener("input", () => {
+  state.audio.bitrate = Number(bitrateRange.value);
+  saveAudioSettings();
+  renderAudioSettings();
+  applySenderSettings();
+});
+
+for (const checkbox of [echoCancellation, noiseSuppression, autoGainControl]) {
+  checkbox.addEventListener("change", () => {
+    state.audio.echoCancellation = echoCancellation.checked;
+    state.audio.noiseSuppression = noiseSuppression.checked;
+    state.audio.autoGainControl = autoGainControl.checked;
+    saveAudioSettings();
+    applyAudioChanges(true);
+  });
+}
+
+noiseLevel.addEventListener("change", () => {
+  state.audio.noiseLevel = noiseLevel.value;
+  state.audio.noiseSuppression = noiseLevel.value !== "off";
+  noiseSuppression.checked = state.audio.noiseSuppression;
+  saveAudioSettings();
+  applyAudioChanges(true);
+});
+
+screenButton.addEventListener("click", () => {
+  if (state.screenStream) {
+    stopScreenShare();
+  } else {
+    startScreenShare();
+  }
 });
 
 muteButton.addEventListener("click", () => {
@@ -101,6 +273,10 @@ window.addEventListener("beforeunload", () => {
   }
 });
 
+if (navigator.mediaDevices?.addEventListener) {
+  navigator.mediaDevices.addEventListener("devicechange", refreshDevices);
+}
+
 function connect() {
   clearTimeout(state.reconnectTimer);
 
@@ -110,7 +286,7 @@ function connect() {
 
   state.socket.addEventListener("open", () => {
     connectionStatus.textContent = "Baglandi";
-    if (state.myName) send("join", { name: state.myName });
+    if (state.myName) send("join", { name: state.myName, avatar: state.avatar });
   });
 
   state.socket.addEventListener("close", () => {
@@ -142,8 +318,9 @@ function handleServerMessage(message) {
     case "joined":
       state.myId = message.id;
       state.myName = message.name;
+      state.avatar = message.avatar || state.avatar;
       profileName.textContent = message.name;
-      profileAvatar.textContent = initials(message.name);
+      renderAvatar(profileAvatar, message.name, state.avatar);
       break;
 
     case "state":
@@ -164,6 +341,7 @@ function handleServerMessage(message) {
       for (const peer of message.peers || []) {
         createPeer(peer.id, true);
       }
+      startStats();
       break;
 
     case "peerJoined":
@@ -200,24 +378,46 @@ async function joinVoice(channel) {
   }
 
   try {
-    if (!state.localStream) {
-      state.localStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
-        }
-      });
-    }
-
+    await ensureLocalStream();
     cleanupPeers();
     state.currentVoice = channel;
     state.muted = false;
     send("joinVoice", { channel });
     renderVoiceControls();
+    startStats();
   } catch {
     systemMessage("Mikrofon izni alinamadi. Tarayici veya Windows mikrofon iznini kontrol et.");
   }
+}
+
+async function ensureLocalStream() {
+  if (state.localStream) return state.localStream;
+
+  state.localStream = await navigator.mediaDevices.getUserMedia({
+    audio: buildAudioConstraints()
+  });
+
+  await refreshDevices();
+  return state.localStream;
+}
+
+function buildAudioConstraints() {
+  const strongNoise = state.audio.noiseLevel === "strong";
+  const audio = {
+    echoCancellation: state.audio.echoCancellation,
+    noiseSuppression: state.audio.noiseSuppression,
+    autoGainControl: state.audio.autoGainControl,
+    channelCount: 1,
+    sampleRate: 48000,
+    sampleSize: 16,
+    latency: strongNoise ? 0.04 : 0.02
+  };
+
+  if (state.audio.inputDeviceId) {
+    audio.deviceId = { exact: state.audio.inputDeviceId };
+  }
+
+  return audio;
 }
 
 function leaveVoice(sendToServer = true) {
@@ -233,8 +433,15 @@ function cleanupVoice(stopTracks) {
     state.localStream = null;
   }
 
+  if (stopTracks) {
+    stopScreenShare(false);
+  }
+
+  clearInterval(state.statsTimer);
+  state.statsTimer = null;
   state.currentVoice = null;
   state.muted = false;
+  audioStats.textContent = "Hazir";
   renderVoiceControls();
 }
 
@@ -254,6 +461,9 @@ function createPeer(peerId, shouldOffer) {
   audio.playsInline = true;
 
   state.localStream.getTracks().forEach(track => pc.addTrack(track, state.localStream));
+  if (state.screenStream) {
+    state.screenStream.getVideoTracks().forEach(track => pc.addTrack(track, state.screenStream));
+  }
 
   pc.onicecandidate = event => {
     if (event.candidate) {
@@ -262,8 +472,15 @@ function createPeer(peerId, shouldOffer) {
   };
 
   pc.ontrack = event => {
-    audio.srcObject = event.streams[0];
-    audio.play().catch(() => {});
+    const [stream] = event.streams;
+    if (event.track.kind === "audio") {
+      audio.srcObject = stream;
+      applyOutputDevice(audio);
+      audio.play().catch(() => {});
+    }
+    if (event.track.kind === "video") {
+      renderRemoteVideo(peerId, stream);
+    }
   };
 
   pc.onconnectionstatechange = () => {
@@ -272,7 +489,9 @@ function createPeer(peerId, shouldOffer) {
     }
   };
 
-  state.peers.set(peerId, { pc, audio, candidates: [] });
+  state.peers.set(peerId, { pc, audio, candidates: [], lastBytesSent: 0, lastBytesReceived: 0, videoStream: null });
+  applySenderSettings(pc);
+  applyVideoSenderSettings(pc);
   renderVoiceControls();
 
   if (shouldOffer) {
@@ -284,8 +503,11 @@ function createPeer(peerId, shouldOffer) {
 
 async function createOffer(peerId, pc) {
   try {
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
+    const offer = await pc.createOffer({
+      offerToReceiveAudio: true,
+      offerToReceiveVideo: true
+    });
+    await pc.setLocalDescription(tuneDescription(offer));
     send("signal", { to: peerId, signal: { description: pc.localDescription } });
   } catch {
     closePeer(peerId);
@@ -309,7 +531,7 @@ async function handleSignal(peerId, signal) {
 
       if (signal.description.type === "offer") {
         const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
+        await pc.setLocalDescription(tuneDescription(answer));
         send("signal", { to: peerId, signal: { description: pc.localDescription } });
       }
     }
@@ -326,14 +548,202 @@ async function handleSignal(peerId, signal) {
   }
 }
 
+function tuneDescription(description) {
+  const bitrate = Math.max(24000, Math.min(128000, Number(state.audio.bitrate || 64000)));
+  const stereo = "stereo=0;sprop-stereo=0";
+  const opusParams = `minptime=10;useinbandfec=1;usedtx=1;maxaveragebitrate=${bitrate};${stereo}`;
+  const sdp = description.sdp.replace(/a=fmtp:(\d+) ((?=.*useinbandfec).*)/g, (line, payload, params) => {
+    const merged = new Map();
+    `${params};${opusParams}`.split(";").forEach(part => {
+      const [key, value] = part.split("=");
+      if (key) merged.set(key.trim(), value === undefined ? "" : value.trim());
+    });
+    const value = [...merged.entries()].map(([key, val]) => val ? `${key}=${val}` : key).join(";");
+    return `a=fmtp:${payload} ${value}`;
+  });
+
+  return new RTCSessionDescription({
+    type: description.type,
+    sdp
+  });
+}
+
+function applySenderSettings(targetPc) {
+  const peers = targetPc ? [{ pc: targetPc }] : [...state.peers.values()];
+
+  for (const peer of peers) {
+    const sender = peer.pc.getSenders().find(item => item.track?.kind === "audio");
+    if (!sender) continue;
+
+    const parameters = sender.getParameters();
+    parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}];
+    parameters.encodings[0].maxBitrate = Number(state.audio.bitrate);
+    parameters.encodings[0].priority = "high";
+    sender.setParameters(parameters).catch(() => {});
+  }
+}
+
+function applyVideoSenderSettings(targetPc) {
+  const peers = targetPc ? [{ pc: targetPc }] : [...state.peers.values()];
+  for (const peer of peers) {
+    const sender = peer.pc.getSenders().find(item => item.track?.kind === "video");
+    if (!sender) continue;
+    const parameters = sender.getParameters();
+    parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}];
+    parameters.encodings[0].maxBitrate = 2_500_000;
+    parameters.encodings[0].maxFramerate = 30;
+    parameters.encodings[0].priority = "high";
+    sender.setParameters(parameters).catch(() => {});
+  }
+}
+
+async function startScreenShare() {
+  if (!state.currentVoice) {
+    systemMessage("Yayin acmak icin once ses kanalina gir.");
+    return;
+  }
+
+  try {
+    state.screenStream = await navigator.mediaDevices.getDisplayMedia({
+      video: {
+        frameRate: { ideal: 30, max: 30 },
+        width: { ideal: 1920, max: 1920 },
+        height: { ideal: 1080, max: 1080 }
+      },
+      audio: false
+    });
+
+    const [track] = state.screenStream.getVideoTracks();
+    track.addEventListener("ended", () => stopScreenShare());
+
+    renderLocalVideo(state.screenStream);
+    for (const [peerId, peer] of state.peers.entries()) {
+      peer.pc.addTrack(track, state.screenStream);
+      applyVideoSenderSettings(peer.pc);
+      createOffer(peerId, peer.pc);
+    }
+
+    renderVoiceControls();
+    systemMessage("Yayin basladi.");
+  } catch {
+    systemMessage("Yayin izni alinamadi.");
+  }
+}
+
+function stopScreenShare(renegotiate = true) {
+  if (!state.screenStream) return;
+
+  for (const track of state.screenStream.getTracks()) track.stop();
+  state.screenStream = null;
+  removeVideoTile("local");
+
+  for (const [peerId, peer] of state.peers.entries()) {
+    peer.pc.getSenders()
+      .filter(sender => sender.track?.kind === "video")
+      .forEach(sender => peer.pc.removeTrack(sender));
+    if (renegotiate) createOffer(peerId, peer.pc);
+  }
+
+  renderVoiceControls();
+}
+
+async function applyAudioChanges(restartStream = false) {
+  applySenderSettings();
+
+  if (!state.currentVoice || !restartStream) return;
+
+  const channel = state.currentVoice;
+  leaveVoice(true);
+  await new Promise(resolve => setTimeout(resolve, 250));
+  joinVoice(channel);
+}
+
+async function refreshDevices() {
+  if (!navigator.mediaDevices?.enumerateDevices) return;
+
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    fillDeviceSelect(inputDevice, devices.filter(device => device.kind === "audioinput"), "Varsayilan mikrofon", state.audio.inputDeviceId);
+    fillDeviceSelect(outputDevice, devices.filter(device => device.kind === "audiooutput"), "Varsayilan hoparlor", state.audio.outputDeviceId);
+  } catch {}
+}
+
+function fillDeviceSelect(select, devices, defaultLabel, selectedId) {
+  const options = [`<option value="">${defaultLabel}</option>`];
+  devices.forEach((device, index) => {
+    const label = device.label || `${defaultLabel} ${index + 1}`;
+    const selected = device.deviceId === selectedId ? " selected" : "";
+    options.push(`<option value="${escapeHtml(device.deviceId)}"${selected}>${escapeHtml(label)}</option>`);
+  });
+  select.innerHTML = options.join("");
+}
+
+function applyOutputDevice(audioElement) {
+  const elements = audioElement ? [audioElement] : [...state.peers.values()].map(peer => peer.audio);
+
+  for (const element of elements) {
+    if (typeof element.setSinkId === "function") {
+      element.setSinkId(state.audio.outputDeviceId || "").catch(() => {});
+    }
+  }
+}
+
+function renderAudioSettings() {
+  qualityPreset.value = state.audio.preset;
+  bitrateRange.value = state.audio.bitrate;
+  bitrateLabel.textContent = `${Math.round(state.audio.bitrate / 1000)} kbps`;
+  echoCancellation.checked = state.audio.echoCancellation;
+  noiseSuppression.checked = state.audio.noiseSuppression;
+  autoGainControl.checked = state.audio.autoGainControl;
+  noiseLevel.value = state.audio.noiseLevel;
+}
+
+function saveAudioSettings() {
+  localStorage.setItem("black-cord-audio", JSON.stringify(state.audio));
+}
+
 function closePeer(peerId) {
   const peer = state.peers.get(peerId);
   if (!peer) return;
 
   peer.pc.close();
   peer.audio.srcObject = null;
+  removeVideoTile(peerId);
   state.peers.delete(peerId);
   renderVoiceControls();
+}
+
+function startStats() {
+  if (state.statsTimer) return;
+
+  state.statsTimer = setInterval(async () => {
+    let sendKbps = 0;
+    let receiveKbps = 0;
+
+    for (const peer of state.peers.values()) {
+      const stats = await peer.pc.getStats();
+      stats.forEach(report => {
+        if (report.type === "outbound-rtp" && report.kind === "audio") {
+          sendKbps += diffKbps(report.bytesSent, peer.lastBytesSent);
+          peer.lastBytesSent = report.bytesSent;
+        }
+        if (report.type === "inbound-rtp" && report.kind === "audio") {
+          receiveKbps += diffKbps(report.bytesReceived, peer.lastBytesReceived);
+          peer.lastBytesReceived = report.bytesReceived;
+        }
+      });
+    }
+
+    const peerCount = state.peers.size;
+    audioStats.textContent = peerCount
+      ? `${peerCount} baglanti | giden ${sendKbps} kbps | gelen ${receiveKbps} kbps`
+      : "Kanaldasiniz";
+  }, 2000);
+}
+
+function diffKbps(current, previous) {
+  if (!current || !previous) return 0;
+  return Math.max(0, Math.round(((current - previous) * 8) / 2000));
 }
 
 function renderHistory(history) {
@@ -357,13 +767,14 @@ function appendMessage(message) {
   const row = document.createElement("article");
   row.className = "message";
   row.innerHTML = `
-    <div class="avatar">${escapeHtml(initials(message.name))}</div>
+    <div class="avatar">${avatarMarkup(message.name, message.avatar)}</div>
     <div>
       <header>
         <strong>${escapeHtml(message.name)}</strong>
         <time>${formatTime(message.time)}</time>
       </header>
-      <p>${escapeHtml(message.text)}</p>
+      ${message.text ? `<p>${escapeHtml(message.text)}</p>` : ""}
+      ${message.kind === "image" && message.image ? `<img class="message-image" src="${message.image}" alt="Paylasilan resim">` : ""}
     </div>
   `;
   chatLog.append(row);
@@ -385,7 +796,7 @@ function renderUsers() {
     const item = document.createElement("div");
     item.className = "user";
     item.innerHTML = `
-      <div class="avatar">${escapeHtml(initials(user.name))}</div>
+      <div class="avatar">${avatarMarkup(user.name, user.avatar)}</div>
       <div>
         <strong>${escapeHtml(user.name)}</strong>
         <span>${user.channel ? voiceName(user.channel) : "Online"}</span>
@@ -409,9 +820,12 @@ function renderVoiceControls() {
 
   voiceBar.classList.toggle("hidden", !inVoice);
   muteButton.disabled = !inVoice;
+  screenButton.disabled = !inVoice;
   leaveVoiceButton.disabled = !inVoice;
   muteButton.classList.toggle("danger", state.muted);
+  screenButton.classList.toggle("live", Boolean(state.screenStream));
   muteIcon.textContent = state.muted ? "Muted" : "Mic";
+  screenIcon.textContent = state.screenStream ? "Live" : "Cast";
   voiceStatus.textContent = inVoice ? voiceName(state.currentVoice) : "Seste degil";
 
   if (!inVoice) return;
@@ -432,7 +846,7 @@ function renderVoiceControls() {
 function showApp() {
   login.classList.add("hidden");
   profileName.textContent = state.myName;
-  profileAvatar.textContent = initials(state.myName);
+  renderAvatar(profileAvatar, state.myName, state.avatar);
   messageInput.focus();
 }
 
@@ -458,6 +872,80 @@ function initials(name) {
     .slice(0, 2)
     .map(part => part[0]?.toUpperCase())
     .join("") || "?";
+}
+
+function avatarMarkup(name, avatar) {
+  return avatar
+    ? `<img src="${avatar}" alt="">`
+    : escapeHtml(initials(name));
+}
+
+function renderAvatar(target, name, avatar) {
+  target.innerHTML = avatarMarkup(name, avatar);
+}
+
+async function compressImage(file, maxSize, quality) {
+  if (!file.type.startsWith("image/")) {
+    throw new Error("Not an image");
+  }
+
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, maxSize / Math.max(bitmap.width, bitmap.height));
+  const width = Math.max(1, Math.round(bitmap.width * scale));
+  const height = Math.max(1, Math.round(bitmap.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+
+  const context = canvas.getContext("2d", {
+    alpha: false,
+    desynchronized: true
+  });
+  context.imageSmoothingQuality = "high";
+  context.drawImage(bitmap, 0, 0, width, height);
+  bitmap.close?.();
+
+  const type = file.type === "image/png" ? "image/png" : "image/jpeg";
+  return canvas.toDataURL(type, quality);
+}
+
+function renderLocalVideo(stream) {
+  renderVideoTile("local", "Senin yayinin", stream, true);
+}
+
+function renderRemoteVideo(peerId, stream) {
+  const user = state.users.find(item => item.id === peerId);
+  renderVideoTile(peerId, `${user?.name || "Arkadas"} yayini`, stream, false);
+}
+
+function renderVideoTile(id, label, stream, muted) {
+  stage.classList.remove("hidden");
+  let tile = document.querySelector(`[data-video-id="${id}"]`);
+  if (!tile) {
+    tile = document.createElement("div");
+    tile.className = "video-tile";
+    tile.dataset.videoId = id;
+    tile.innerHTML = `<video autoplay playsinline></video><span class="video-label"></span>`;
+    videoGrid.append(tile);
+  }
+
+  const video = tile.querySelector("video");
+  video.muted = muted;
+  video.srcObject = stream;
+  video.play().catch(() => {});
+  tile.querySelector(".video-label").textContent = label;
+  updateStageStatus();
+}
+
+function removeVideoTile(id) {
+  document.querySelector(`[data-video-id="${id}"]`)?.remove();
+  updateStageStatus();
+}
+
+function updateStageStatus() {
+  const count = videoGrid.children.length;
+  stage.classList.toggle("hidden", count === 0);
+  stageStatus.textContent = count ? `${count} yayin aktif` : "Aktif yayin yok";
 }
 
 function formatTime(time) {
