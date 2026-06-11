@@ -49,6 +49,7 @@ const state = {
   myId: null,
   myName: localStorage.getItem("black-cord-name") || "",
   avatar: localStorage.getItem("black-cord-avatar") || "",
+  status: localStorage.getItem("black-cord-status") || "online",
   users: [],
   channels: { voice1: [], voice2: [] },
   currentVoice: null,
@@ -63,6 +64,8 @@ const state = {
   muted: false,
   reconnectTimer: null,
   statsTimer: null,
+  typingTimer: null,
+  typingUsers: new Map(),
   peers: new Map(),
   audio: { ...defaultAudioSettings, ...savedAudioSettings }
 };
@@ -146,6 +149,9 @@ const voiceCount = $("#voiceCount");
 const qualityStatus = $("#qualityStatus");
 const micMeter = $("#micMeter");
 const micMeterLabel = $("#micMeterLabel");
+const inviteButton = $("#inviteButton");
+const typingIndicator = $("#typingIndicator");
+const accountStatusSelect = $("#accountStatusSelect");
 
 nameInput.value = state.myName;
 profileName.textContent = state.myName || "Misafir";
@@ -172,7 +178,7 @@ loginForm.addEventListener("submit", event => {
   state.myName = name;
   localStorage.setItem("black-cord-name", name);
   showApp();
-  send("join", { name, avatar: state.avatar });
+  send("join", { name, avatar: state.avatar, status: state.status });
 });
 
 chatForm.addEventListener("submit", event => {
@@ -187,7 +193,29 @@ chatForm.addEventListener("submit", event => {
   }
 
   send("chat", { text });
+  sendTyping(false);
   messageInput.value = "";
+});
+
+messageInput.addEventListener("input", () => {
+  if (!messageInput.value.trim()) {
+    sendTyping(false);
+    return;
+  }
+
+  sendTyping(true);
+  clearTimeout(state.typingTimer);
+  state.typingTimer = setTimeout(() => sendTyping(false), 1200);
+});
+
+inviteButton.addEventListener("click", async () => {
+  const link = location.origin;
+  try {
+    await navigator.clipboard.writeText(link);
+    systemMessage("Davet linki kopyalandı.");
+  } catch {
+    systemMessage(`Davet linki: ${link}`);
+  }
 });
 
 imageButton.addEventListener("click", () => imageInput.click());
@@ -231,6 +259,7 @@ avatarButton.addEventListener("click", () => avatarInput.click());
 
 accountButton.addEventListener("click", () => {
   accountNameInput.value = state.myName;
+  accountStatusSelect.value = state.status;
   renderAvatar(accountAvatarPreview, state.myName, state.avatar);
   accountModal.classList.remove("hidden");
 });
@@ -247,11 +276,13 @@ accountForm.addEventListener("submit", event => {
   if (!name) return;
 
   state.myName = name;
+  state.status = accountStatusSelect.value;
   localStorage.setItem("black-cord-name", name);
+  localStorage.setItem("black-cord-status", state.status);
   profileName.textContent = name;
   renderAvatar(profileAvatar, name, state.avatar);
   renderAvatar(accountAvatarPreview, name, state.avatar);
-  send("profile", { name, avatar: state.avatar });
+  send("profile", { name, avatar: state.avatar, status: state.status });
   accountModal.classList.add("hidden");
 });
 
@@ -269,7 +300,7 @@ avatarInput.addEventListener("change", async () => {
     localStorage.setItem("black-cord-avatar", state.avatar);
     renderAvatar(profileAvatar, state.myName, state.avatar);
     renderAvatar(accountAvatarPreview, state.myName, state.avatar);
-    send("profile", { name: state.myName, avatar: state.avatar });
+    send("profile", { name: state.myName, avatar: state.avatar, status: state.status });
   } catch {
     systemMessage("Profil fotoğrafı hazırlanamadı.");
   }
@@ -381,7 +412,7 @@ function connect() {
 
   state.socket.addEventListener("open", () => {
     connectionStatus.textContent = "Bağlandı";
-    if (state.myName) send("join", { name: state.myName, avatar: state.avatar });
+    if (state.myName) send("join", { name: state.myName, avatar: state.avatar, status: state.status });
   });
 
   state.socket.addEventListener("close", () => {
@@ -430,6 +461,14 @@ function handleServerMessage(message) {
 
     case "chat":
       appendMessage(message);
+      break;
+
+    case "reaction":
+      updateMessageReactions(message.messageId, message.reactions || {});
+      break;
+
+    case "typing":
+      updateTyping(message);
       break;
 
     case "voicePeers":
@@ -664,6 +703,7 @@ function cleanupVoice(stopTracks) {
   audioStats.textContent = "Hazır";
   micMeter.style.width = "0%";
   micMeterLabel.textContent = "0%";
+  renderChannels();
   renderVoiceControls();
 }
 
@@ -681,6 +721,23 @@ function createPeer(peerId, shouldOffer) {
   const audio = new Audio();
   audio.autoplay = true;
   audio.playsInline = true;
+  const peer = {
+    pc,
+    audio,
+    candidates: [],
+    lastBytesSent: 0,
+    lastBytesReceived: 0,
+    level: 0,
+    speakingUntil: 0,
+    audioContext: null,
+    analyser: null,
+    samples: null,
+    videoStream: null,
+    makingOffer: false,
+    ignoreOffer: false,
+    polite: String(state.myId || "") > String(peerId)
+  };
+  state.peers.set(peerId, peer);
 
   state.localStream.getTracks().forEach(track => pc.addTrack(track, state.localStream));
   if (state.screenStream) {
@@ -694,9 +751,10 @@ function createPeer(peerId, shouldOffer) {
   };
 
   pc.ontrack = event => {
-    const [stream] = event.streams;
+    const stream = event.streams[0] || new MediaStream([event.track]);
     if (event.track.kind === "audio") {
       audio.srcObject = stream;
+      watchRemoteAudio(peer, stream);
       applyOutputDevice(audio);
       audio.play().catch(() => {});
     }
@@ -706,33 +764,43 @@ function createPeer(peerId, shouldOffer) {
   };
 
   pc.onconnectionstatechange = () => {
-    if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+    if (pc.connectionState === "closed") {
       closePeer(peerId);
     }
   };
 
-  state.peers.set(peerId, { pc, audio, candidates: [], lastBytesSent: 0, lastBytesReceived: 0, videoStream: null });
+  pc.onnegotiationneeded = () => {
+    negotiatePeer(peerId);
+  };
+
   applySenderSettings(pc);
   applyVideoSenderSettings(pc);
   renderVoiceControls();
 
   if (shouldOffer) {
-    createOffer(peerId, pc);
+    negotiatePeer(peerId);
   }
 
   return pc;
 }
 
-async function createOffer(peerId, pc) {
+async function negotiatePeer(peerId) {
+  const peer = state.peers.get(peerId);
+  if (!peer || peer.pc.signalingState !== "stable") return;
+
   try {
-    const offer = await pc.createOffer({
+    peer.makingOffer = true;
+    const offer = await peer.pc.createOffer({
       offerToReceiveAudio: true,
       offerToReceiveVideo: true
     });
-    await pc.setLocalDescription(tuneDescription(offer));
-    send("signal", { to: peerId, signal: { description: pc.localDescription } });
+    await peer.pc.setLocalDescription(tuneDescription(offer));
+    send("signal", { to: peerId, signal: { description: peer.pc.localDescription } });
   } catch {
-    closePeer(peerId);
+    systemMessage("Bağlantı yenilenirken sorun oldu, tekrar deneniyor.");
+    setTimeout(() => negotiatePeer(peerId), 700);
+  } finally {
+    if (peer) peer.makingOffer = false;
   }
 }
 
@@ -745,13 +813,24 @@ async function handleSignal(peerId, signal) {
 
   try {
     if (signal.description) {
-      await pc.setRemoteDescription(signal.description);
+      const description = signal.description;
+      const readyForOffer = !peer.makingOffer && pc.signalingState === "stable";
+      const offerCollision = description.type === "offer" && !readyForOffer;
+
+      peer.ignoreOffer = !peer.polite && offerCollision;
+      if (peer.ignoreOffer) return;
+
+      if (offerCollision) {
+        await pc.setLocalDescription({ type: "rollback" }).catch(() => {});
+      }
+
+      await pc.setRemoteDescription(description);
 
       while (peer.candidates.length) {
         await pc.addIceCandidate(peer.candidates.shift());
       }
 
-      if (signal.description.type === "offer") {
+      if (description.type === "offer") {
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(tuneDescription(answer));
         send("signal", { to: peerId, signal: { description: pc.localDescription } });
@@ -760,13 +839,15 @@ async function handleSignal(peerId, signal) {
 
     if (signal.candidate) {
       if (pc.remoteDescription) {
-        await pc.addIceCandidate(signal.candidate);
+        await pc.addIceCandidate(signal.candidate).catch(error => {
+          if (!peer.ignoreOffer) throw error;
+        });
       } else {
         peer.candidates.push(signal.candidate);
       }
     }
   } catch {
-    closePeer(peerId);
+    systemMessage("Ses bağlantısı yenilenemedi. Sesten çıkıp tekrar girmeyi dene.");
   }
 }
 
@@ -833,9 +914,12 @@ async function startScreenShare() {
 
     renderLocalVideo(state.screenStream);
     for (const [peerId, peer] of state.peers.entries()) {
-      peer.pc.addTrack(track, state.screenStream);
+      const hasVideoSender = peer.pc.getSenders().some(sender => sender.track?.kind === "video");
+      if (!hasVideoSender) {
+        peer.pc.addTrack(track, state.screenStream);
+      }
       applyVideoSenderSettings(peer.pc);
-      createOffer(peerId, peer.pc);
+      negotiatePeer(peerId);
     }
 
     renderVoiceControls();
@@ -847,23 +931,27 @@ async function startScreenShare() {
 
 async function getScreenStream() {
   if (window.blackCordDesktop?.listScreenSources) {
-    const sources = await window.blackCordDesktop.listScreenSources();
-    if (sources.length) {
-      const source = await pickScreenSource(sources);
-      return navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: {
-          mandatory: {
-            chromeMediaSource: "desktop",
-            chromeMediaSourceId: source.id,
-            minWidth: 1280,
-            maxWidth: 1920,
-            minHeight: 720,
-            maxHeight: 1080,
-            maxFrameRate: 30
+    try {
+      const sources = await window.blackCordDesktop.listScreenSources();
+      if (sources.length) {
+        const source = await pickScreenSource(sources);
+        return navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: {
+            mandatory: {
+              chromeMediaSource: "desktop",
+              chromeMediaSourceId: source.id,
+              minWidth: 1280,
+              maxWidth: 1920,
+              minHeight: 720,
+              maxHeight: 1080,
+              maxFrameRate: 30
+            }
           }
-        }
-      });
+        });
+      }
+    } catch {
+      systemMessage("Program içi yayın seçici çalışmadı, normal ekran seçici açılıyor.");
     }
   }
 
@@ -920,7 +1008,7 @@ function stopScreenShare(renegotiate = true) {
     peer.pc.getSenders()
       .filter(sender => sender.track?.kind === "video")
       .forEach(sender => peer.pc.removeTrack(sender));
-    if (renegotiate) createOffer(peerId, peer.pc);
+    if (renegotiate) negotiatePeer(peerId);
   }
 
   renderVoiceControls();
@@ -967,6 +1055,43 @@ function applyOutputDevice(audioElement) {
   }
 }
 
+function watchRemoteAudio(peer, stream) {
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass || peer.analyser) return;
+
+  try {
+    const context = new AudioContextClass({ latencyHint: "interactive" });
+    const source = context.createMediaStreamSource(stream);
+    const analyser = context.createAnalyser();
+    analyser.fftSize = 256;
+    analyser.smoothingTimeConstant = 0.62;
+    source.connect(analyser);
+    peer.audioContext = context;
+    peer.analyser = analyser;
+    peer.samples = new Uint8Array(analyser.fftSize);
+  } catch {}
+}
+
+function updateVoiceActivity() {
+  const now = Date.now();
+
+  for (const peer of state.peers.values()) {
+    if (!peer.analyser || !peer.samples) continue;
+
+    peer.analyser.getByteTimeDomainData(peer.samples);
+    let sum = 0;
+    for (const sample of peer.samples) {
+      const centered = (sample - 128) / 128;
+      sum += centered * centered;
+    }
+
+    peer.level = Math.sqrt(sum / peer.samples.length);
+    if (peer.level > 0.018) peer.speakingUntil = now + 900;
+  }
+
+  renderVoiceControls();
+}
+
 function renderAudioSettings() {
   qualityPreset.value = state.audio.preset;
   bitrateRange.value = state.audio.bitrate;
@@ -992,6 +1117,9 @@ function closePeer(peerId) {
 
   peer.pc.close();
   peer.audio.srcObject = null;
+  if (peer.audioContext) {
+    peer.audioContext.close().catch(() => {});
+  }
   removeVideoTile(peerId);
   state.peers.delete(peerId);
   renderVoiceControls();
@@ -1022,15 +1150,16 @@ function startStats() {
     const micPercent = Math.min(100, Math.round(state.micLevel * 1400));
     micMeter.style.width = `${micPercent}%`;
     micMeterLabel.textContent = `${micPercent}%`;
+    updateVoiceActivity();
     audioStats.textContent = peerCount
       ? `${peerCount} bağlantı | giden ${sendKbps} kbps | gelen ${receiveKbps} kbps | mikrofon ${Math.round(state.micLevel * 1000)}`
       : `Kanaldasın | mikrofon ${Math.round(state.micLevel * 1000)}`;
-  }, 2000);
+  }, 1000);
 }
 
 function diffKbps(current, previous) {
   if (!current || !previous) return 0;
-  return Math.max(0, Math.round(((current - previous) * 8) / 2000));
+  return Math.max(0, Math.round(((current - previous) * 8) / 1000));
 }
 
 function renderHistory(history) {
@@ -1053,6 +1182,7 @@ function appendMessage(message) {
 
   const row = document.createElement("article");
   row.className = "message";
+  row.dataset.messageId = message.id || "";
   row.innerHTML = `
     <div class="avatar">${avatarMarkup(message.name, message.avatar)}</div>
     <div>
@@ -1064,9 +1194,77 @@ function appendMessage(message) {
       ${message.kind === "image" && message.image ? `<img class="message-image" src="${message.image}" alt="Paylaşılan resim">` : ""}
     </div>
   `;
+  row.querySelector("div:last-child")?.insertAdjacentHTML("beforeend", `<div class="message-actions">${reactionMarkup(message.id, message.reactions || {})}</div>`);
   chatLog.append(row);
   chatLog.scrollTop = chatLog.scrollHeight;
 }
+
+chatLog.addEventListener("click", event => {
+  const button = event.target.closest("[data-reaction]");
+  if (!button) return;
+
+  send("reaction", {
+    messageId: button.dataset.messageId,
+    reaction: button.dataset.reaction
+  });
+});
+
+function reactionMarkup(messageId, reactions) {
+  if (!messageId) return "";
+
+  const items = [
+    ["like", "İyi"],
+    ["laugh", "Haha"],
+    ["fire", "Alev"],
+    ["heart", "Kalp"]
+  ];
+
+  return items.map(([key, label]) => {
+    const users = reactions[key] || [];
+    const active = users.includes(state.myId) ? " active" : "";
+    const count = users.length ? ` ${users.length}` : "";
+    return `<button class="reaction-button${active}" type="button" data-message-id="${messageId}" data-reaction="${key}">${label}${count}</button>`;
+  }).join("");
+}
+
+function updateMessageReactions(messageId, reactions) {
+  if (!messageId) return;
+  const row = chatLog.querySelector(`[data-message-id="${CSS.escape(messageId)}"]`);
+  if (!row) return;
+  const actions = row.querySelector(".message-actions");
+  if (actions) actions.innerHTML = reactionMarkup(messageId, reactions);
+}
+
+function sendTyping(typing) {
+  send("typing", { typing });
+}
+
+function updateTyping(message) {
+  if (!message.userId || message.userId === state.myId) return;
+
+  if (message.typing) {
+    state.typingUsers.set(message.userId, {
+      name: message.name,
+      expires: Date.now() + 1800
+    });
+  } else {
+    state.typingUsers.delete(message.userId);
+  }
+
+  renderTypingIndicator();
+}
+
+function renderTypingIndicator() {
+  const now = Date.now();
+  for (const [id, item] of state.typingUsers.entries()) {
+    if (item.expires < now) state.typingUsers.delete(id);
+  }
+
+  const names = [...state.typingUsers.values()].map(item => item.name).slice(0, 3);
+  typingIndicator.textContent = names.length ? `${names.join(", ")} yazıyor...` : "";
+}
+
+setInterval(renderTypingIndicator, 1000);
 
 function systemMessage(text) {
   const now = Date.now();
@@ -1092,8 +1290,9 @@ function renderUsers() {
       <div class="avatar">${avatarMarkup(user.name, user.avatar)}</div>
       <div>
         <strong>${escapeHtml(user.name)}</strong>
-        <span>${user.channel ? voiceName(user.channel) : "Çevrimiçi"}</span>
+        <span>${user.channel ? voiceName(user.channel) : statusLabel(user.status)}</span>
       </div>
+      <span class="status-dot ${statusClass(user.status)}" title="${statusLabel(user.status)}"></span>
     `;
     userList.append(item);
   }
@@ -1117,10 +1316,11 @@ function renderVoiceMembers(channel, users) {
   container.innerHTML = "";
   for (const user of users) {
     const item = document.createElement("div");
-    item.className = "voice-member";
+    item.className = `voice-member${isUserSpeaking(user.id) ? " active" : ""}`;
     item.innerHTML = `
       <span class="mini-avatar">${avatarMarkup(user.name, user.avatar)}</span>
       <span>${escapeHtml(user.name)}</span>
+      <span class="voice-level ${isUserSpeaking(user.id) ? "active" : ""}"></span>
     `;
     container.append(item);
   }
@@ -1142,16 +1342,37 @@ function renderVoiceControls() {
   if (!inVoice) return;
 
   const people = state.channels[state.currentVoice] || [];
+  const activePeople = people.filter(user => isUserSpeaking(user.id));
+  const visiblePeople = activePeople.length ? activePeople : people;
+
   currentVoiceName.textContent = voiceName(state.currentVoice);
   currentVoicePeople.textContent = `${people.length || 1} kişi bağlı`;
   speakingList.innerHTML = "";
 
-  for (const user of people) {
+  for (const user of visiblePeople) {
     const pill = document.createElement("span");
-    pill.className = "pill";
-    pill.textContent = user.name;
+    pill.className = `pill${user.id === state.myId ? " self" : ""}${isUserSpeaking(user.id) ? " speaking" : ""}`;
+    pill.textContent = `${user.name}${activePeople.length ? " konuşuyor" : ""}`;
     speakingList.append(pill);
   }
+}
+
+function isUserSpeaking(userId) {
+  if (userId === state.myId) return state.micLevel > 0.018;
+  const peer = state.peers.get(userId);
+  return Boolean(peer && (peer.level > 0.018 || peer.speakingUntil > Date.now()));
+}
+
+function statusLabel(status) {
+  return {
+    online: "Çevrimiçi",
+    idle: "Boşta",
+    busy: "Rahatsız etmeyin"
+  }[status] || "Çevrimiçi";
+}
+
+function statusClass(status) {
+  return ["idle", "busy"].includes(status) ? status : "online";
 }
 
 function showApp() {
