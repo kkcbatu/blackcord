@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#101316">
+    <title>Black Cord</title>
+    <link rel="manifest" href="/manifest.json">
+    <link rel="icon" href="/icon.svg">
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="mark">BC</div>
+          <div>
+            <strong>Black Cord</strong>
+            <span id="connectionStatus">Bağlanıyor...</span>
+          </div>
+        </div>
+
+        <section class="panel">
+          <h2>Kanallar</h2>
+          <button class="channel active" type="button" data-text-channel="chat">
+            <span>#</span>
+            sohbet
+          </button>
+        </section>
+
+        <section class="panel">
+          <h2>Ses</h2>
+          <button class="voice-channel" type="button" data-voice-channel="voice1">
+            <span class="voice-icon">1</span>
+            <span>Ses 1</span>
+            <small id="voice1Count">0</small>
+          </button>
+          <button class="voice-channel" type="button" data-voice-channel="voice2">
+            <span class="voice-icon">2</span>
+            <span>Ses 2</span>
+            <small id="voice2Count">0</small>
+          </button>
+        </section>
+
+        <section class="panel grow">
+          <h2>Online</h2>
+          <div id="userList" class="user-list"></div>
+        </section>
+
+        <div class="profile">
+          <div class="avatar" id="profileAvatar">?</div>
+          <div>
+            <strong id="profileName">Misafir</strong>
+            <span id="voiceStatus">Seste değil</span>
+          </div>
+        </div>
+      </aside>
+
+      <section class="content">
+        <header class="topbar">
+          <div>
+            <h1># sohbet</h1>
+            <p>Tek kanal, hızlı mesaj, iki ses odası.</p>
+          </div>
+          <div class="actions">
+            <button id="muteButton" class="icon-button" type="button" title="Mikrofonu kapat/aç" disabled>
+              <span id="muteIcon">Mic</span>
+            </button>
+            <button id="leaveVoiceButton" class="ghost-button" type="button" disabled>Sesten çık</button>
+          </div>
+        </header>
+
+        <div id="voiceBar" class="voice-bar hidden">
+          <div>
+            <strong id="currentVoiceName">Ses</strong>
+            <span id="currentVoicePeople">Bağlanıyor...</span>
+          </div>
+          <div id="speakingList" class="speaking-list"></div>
+        </div>
+
+        <div id="chatLog" class="chat-log"></div>
+
+        <form id="chatForm" class="composer">
+          <input id="messageInput" type="text" maxlength="600" autocomplete="off" placeholder="Mesaj yaz...">
+          <button type="submit">Gönder</button>
+        </form>
+      </section>
+    </main>
+
+    <section id="login" class="login">
+      <form id="loginForm" class="login-card">
+        <div class="login-mark">BC</div>
+        <h1>Black Cord</h1>
+        <p>İsmini yaz, direkt içeri gir.</p>
+        <label>
+          İsim
+          <input id="nameInput" type="text" maxlength="24" autocomplete="nickname" placeholder="Batu">
+        </label>
+        <button type="submit">Giriş yap</button>
+      </form>
+    </section>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
