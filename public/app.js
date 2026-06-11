@@ -1,3 +1,4 @@
+const AUDIO_SETTINGS_VERSION = 2;
 const savedAudioSettings = JSON.parse(localStorage.getItem("black-cord-audio") || "{}");
 
 const defaultAudioSettings = {
@@ -10,7 +11,7 @@ const defaultAudioSettings = {
   autoGainControl: true,
   noiseLevel: "strong",
   noiseGate: true,
-  gateThreshold: 32
+  gateThreshold: 24
 };
 
 const presetSettings = {
@@ -21,7 +22,7 @@ const presetSettings = {
     autoGainControl: true,
     noiseLevel: "strong",
     noiseGate: true,
-    gateThreshold: 38
+    gateThreshold: 28
   },
   balanced: {
     bitrate: 64000,
@@ -30,7 +31,7 @@ const presetSettings = {
     autoGainControl: true,
     noiseLevel: "standard",
     noiseGate: true,
-    gateThreshold: 32
+    gateThreshold: 22
   },
   studio: {
     bitrate: 128000,
@@ -57,6 +58,7 @@ const state = {
   audioContext: null,
   audioNodes: null,
   gateTimer: null,
+  meterTimer: null,
   micLevel: 0,
   muted: false,
   reconnectTimer: null,
@@ -64,6 +66,17 @@ const state = {
   peers: new Map(),
   audio: { ...defaultAudioSettings, ...savedAudioSettings }
 };
+
+if (state.audio.version !== AUDIO_SETTINGS_VERSION) {
+  state.audio = {
+    ...state.audio,
+    version: AUDIO_SETTINGS_VERSION,
+    noiseLevel: "standard",
+    noiseGate: true,
+    gateThreshold: 22
+  };
+  localStorage.setItem("black-cord-audio", JSON.stringify(state.audio));
+}
 
 let lastSystemMessage = "";
 let lastSystemMessageAt = 0;
@@ -118,6 +131,21 @@ const stageStatus = $("#stageStatus");
 const videoGrid = $("#videoGrid");
 const imageButton = $("#imageButton");
 const imageInput = $("#imageInput");
+const accountButton = $("#accountButton");
+const accountModal = $("#accountModal");
+const accountForm = $("#accountForm");
+const closeAccountButton = $("#closeAccountButton");
+const accountNameInput = $("#accountNameInput");
+const accountAvatarButton = $("#accountAvatarButton");
+const accountAvatarPreview = $("#accountAvatarPreview");
+const screenPickerModal = $("#screenPickerModal");
+const closeScreenPickerButton = $("#closeScreenPickerButton");
+const screenSourceGrid = $("#screenSourceGrid");
+const onlineCount = $("#onlineCount");
+const voiceCount = $("#voiceCount");
+const qualityStatus = $("#qualityStatus");
+const micMeter = $("#micMeter");
+const micMeterLabel = $("#micMeterLabel");
 
 nameInput.value = state.myName;
 profileName.textContent = state.myName || "Misafir";
@@ -201,6 +229,36 @@ closeSettingsButton.addEventListener("click", () => {
 
 avatarButton.addEventListener("click", () => avatarInput.click());
 
+accountButton.addEventListener("click", () => {
+  accountNameInput.value = state.myName;
+  renderAvatar(accountAvatarPreview, state.myName, state.avatar);
+  accountModal.classList.remove("hidden");
+});
+
+closeAccountButton.addEventListener("click", () => {
+  accountModal.classList.add("hidden");
+});
+
+accountAvatarButton.addEventListener("click", () => avatarInput.click());
+
+accountForm.addEventListener("submit", event => {
+  event.preventDefault();
+  const name = accountNameInput.value.trim().slice(0, 24);
+  if (!name) return;
+
+  state.myName = name;
+  localStorage.setItem("black-cord-name", name);
+  profileName.textContent = name;
+  renderAvatar(profileAvatar, name, state.avatar);
+  renderAvatar(accountAvatarPreview, name, state.avatar);
+  send("profile", { name, avatar: state.avatar });
+  accountModal.classList.add("hidden");
+});
+
+closeScreenPickerButton.addEventListener("click", () => {
+  screenPickerModal.classList.add("hidden");
+});
+
 avatarInput.addEventListener("change", async () => {
   const file = avatarInput.files?.[0];
   avatarInput.value = "";
@@ -210,6 +268,7 @@ avatarInput.addEventListener("change", async () => {
     state.avatar = await compressImage(file, 256, 0.8);
     localStorage.setItem("black-cord-avatar", state.avatar);
     renderAvatar(profileAvatar, state.myName, state.avatar);
+    renderAvatar(accountAvatarPreview, state.myName, state.avatar);
     send("profile", { name: state.myName, avatar: state.avatar });
   } catch {
     systemMessage("Profil fotoğrafı hazırlanamadı.");
@@ -488,13 +547,13 @@ async function createProcessedMicStream(rawStream) {
   highPass.frequency.value = state.audio.noiseLevel === "strong" ? 95 : 70;
   highPass.Q.value = 0.7;
 
-  compressor.threshold.value = -36;
-  compressor.knee.value = 18;
-  compressor.ratio.value = 4;
-  compressor.attack.value = 0.004;
-  compressor.release.value = 0.16;
+  compressor.threshold.value = -30;
+  compressor.knee.value = 22;
+  compressor.ratio.value = 2.6;
+  compressor.attack.value = 0.008;
+  compressor.release.value = 0.22;
 
-  gate.gain.value = 0;
+  gate.gain.value = 1;
 
   source.connect(analyser);
   source.connect(highPass);
@@ -503,7 +562,7 @@ async function createProcessedMicStream(rawStream) {
   gate.connect(destination);
 
   const samples = new Uint8Array(analyser.fftSize);
-  let open = false;
+  let open = true;
   let holdFrames = 0;
 
   state.gateTimer = setInterval(() => {
@@ -516,23 +575,30 @@ async function createProcessedMicStream(rawStream) {
 
     const rms = Math.sqrt(sum / samples.length);
     state.micLevel = rms;
-    const threshold = Number(state.audio.gateThreshold || 32) / 1000;
+    const threshold = Number(state.audio.gateThreshold || 24) / 1000;
     const openThreshold = threshold;
-    const closeThreshold = threshold * 0.62;
+    const closeThreshold = threshold * 0.52;
 
     if (rms > openThreshold) {
       open = true;
-      holdFrames = state.audio.noiseLevel === "strong" ? 8 : 12;
+      holdFrames = state.audio.noiseLevel === "strong" ? 14 : 18;
     } else if (rms < closeThreshold) {
       holdFrames -= 1;
       if (holdFrames <= 0) open = false;
     }
 
     const now = context.currentTime;
-    const targetGain = open ? 1 : 0.025;
+    const minGain = state.audio.noiseLevel === "strong" ? 0.16 : 0.24;
+    const targetGain = open ? 1 : minGain;
     gate.gain.cancelScheduledValues(now);
-    gate.gain.setTargetAtTime(targetGain, now, open ? 0.012 : 0.055);
+    gate.gain.setTargetAtTime(targetGain, now, open ? 0.018 : 0.12);
   }, 24);
+
+  state.meterTimer = setInterval(() => {
+    const micPercent = Math.min(100, Math.round(state.micLevel * 1400));
+    micMeter.style.width = `${micPercent}%`;
+    micMeterLabel.textContent = `${micPercent}%`;
+  }, 120);
 
   state.audioContext = context;
   state.audioNodes = { source, analyser, highPass, compressor, gate, destination };
@@ -543,6 +609,11 @@ function stopMicProcessing() {
   if (state.gateTimer) {
     clearInterval(state.gateTimer);
     state.gateTimer = null;
+  }
+
+  if (state.meterTimer) {
+    clearInterval(state.meterTimer);
+    state.meterTimer = null;
   }
 
   if (state.audioNodes) {
@@ -590,7 +661,9 @@ function cleanupVoice(stopTracks) {
   state.statsTimer = null;
   state.currentVoice = null;
   state.muted = false;
-  audioStats.textContent = "Hazir";
+  audioStats.textContent = "Hazır";
+  micMeter.style.width = "0%";
+  micMeterLabel.textContent = "0%";
   renderVoiceControls();
 }
 
@@ -753,14 +826,7 @@ async function startScreenShare() {
   }
 
   try {
-    state.screenStream = await navigator.mediaDevices.getDisplayMedia({
-      video: {
-        frameRate: { ideal: 30, max: 30 },
-        width: { ideal: 1920, max: 1920 },
-        height: { ideal: 1080, max: 1080 }
-      },
-      audio: false
-    });
+    state.screenStream = await getScreenStream();
 
     const [track] = state.screenStream.getVideoTracks();
     track.addEventListener("ended", () => stopScreenShare());
@@ -775,8 +841,72 @@ async function startScreenShare() {
     renderVoiceControls();
     systemMessage("Yayın başladı.");
   } catch {
-    systemMessage("Yayın izni alınamadı. Programı yeni sürümle tekrar kurduğundan emin ol.");
+    systemMessage("Yayın başlatılamadı. Yeni kurulum dosyasını yüklediğinden ve bir ses kanalında olduğundan emin ol.");
   }
+}
+
+async function getScreenStream() {
+  if (window.blackCordDesktop?.listScreenSources) {
+    const sources = await window.blackCordDesktop.listScreenSources();
+    if (sources.length) {
+      const source = await pickScreenSource(sources);
+      return navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          mandatory: {
+            chromeMediaSource: "desktop",
+            chromeMediaSourceId: source.id,
+            minWidth: 1280,
+            maxWidth: 1920,
+            minHeight: 720,
+            maxHeight: 1080,
+            maxFrameRate: 30
+          }
+        }
+      });
+    }
+  }
+
+  return navigator.mediaDevices.getDisplayMedia({
+    video: {
+      frameRate: { ideal: 30, max: 30 },
+      width: { ideal: 1920, max: 1920 },
+      height: { ideal: 1080, max: 1080 }
+    },
+    audio: false
+  });
+}
+
+function pickScreenSource(sources) {
+  screenSourceGrid.innerHTML = "";
+  screenPickerModal.classList.remove("hidden");
+
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      screenPickerModal.classList.add("hidden");
+      closeScreenPickerButton.onclick = null;
+    };
+
+    closeScreenPickerButton.onclick = () => {
+      cleanup();
+      reject(new Error("Screen picker closed"));
+    };
+
+    for (const source of sources) {
+      const button = document.createElement("button");
+      button.className = "screen-source";
+      button.type = "button";
+      button.innerHTML = `
+        <img src="${source.thumbnail}" alt="">
+        <span>${escapeHtml(source.name)}</span>
+      `;
+      button.addEventListener("click", () => {
+        cleanup();
+        resolve(source);
+      });
+      screenSourceGrid.append(button);
+    }
+  });
 }
 
 function stopScreenShare(renegotiate = true) {
@@ -848,9 +978,11 @@ function renderAudioSettings() {
   noiseGate.checked = state.audio.noiseGate;
   gateThresholdRange.value = state.audio.gateThreshold;
   gateThresholdLabel.textContent = `${state.audio.gateThreshold}%`;
+  qualityStatus.textContent = qualityPreset.options[qualityPreset.selectedIndex]?.textContent || "Dengeli";
 }
 
 function saveAudioSettings() {
+  state.audio.version = AUDIO_SETTINGS_VERSION;
   localStorage.setItem("black-cord-audio", JSON.stringify(state.audio));
 }
 
@@ -887,6 +1019,9 @@ function startStats() {
     }
 
     const peerCount = state.peers.size;
+    const micPercent = Math.min(100, Math.round(state.micLevel * 1400));
+    micMeter.style.width = `${micPercent}%`;
+    micMeterLabel.textContent = `${micPercent}%`;
     audioStats.textContent = peerCount
       ? `${peerCount} bağlantı | giden ${sendKbps} kbps | gelen ${receiveKbps} kbps | mikrofon ${Math.round(state.micLevel * 1000)}`
       : `Kanaldasın | mikrofon ${Math.round(state.micLevel * 1000)}`;
@@ -948,6 +1083,7 @@ function systemMessage(text) {
 
 function renderUsers() {
   userList.innerHTML = "";
+  onlineCount.textContent = state.users.length;
 
   for (const user of state.users) {
     const item = document.createElement("div");
@@ -964,13 +1100,16 @@ function renderUsers() {
 }
 
 function renderChannels() {
+  let totalVoiceUsers = 0;
   for (const channel of ["voice1", "voice2"]) {
     const users = state.channels[channel] || [];
+    totalVoiceUsers += users.length;
     const button = document.querySelector(`[data-voice-channel="${channel}"]`);
     button.classList.toggle("active", state.currentVoice === channel);
     $(`#${channel}Count`).textContent = users.length;
     renderVoiceMembers(channel, users);
   }
+  voiceCount.textContent = totalVoiceUsers;
 }
 
 function renderVoiceMembers(channel, users) {

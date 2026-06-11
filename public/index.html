@@ -57,6 +57,7 @@
             <strong id="profileName">Misafir</strong>
             <span id="voiceStatus">Seste değil</span>
           </div>
+          <button id="accountButton" class="profile-settings" type="button" title="Hesap ayarları">Ayar</button>
           <input id="avatarInput" class="file-input" type="file" accept="image/*">
         </div>
       </aside>
@@ -64,8 +65,8 @@
       <section class="content">
         <header class="topbar">
           <div>
-            <h1># sohbet</h1>
-            <p>Mesajlaş, sese gir, yayın aç ve görsel paylaş.</p>
+            <h1>Arkadaş Odası</h1>
+            <p>Mesaj, ses, yayın ve dosya paylaşımı tek ekranda.</p>
           </div>
           <div class="actions">
             <button id="settingsButton" class="icon-button" type="button" title="Ses ayarları">
@@ -80,6 +81,21 @@
             <button id="leaveVoiceButton" class="ghost-button" type="button" disabled>Sesten çık</button>
           </div>
         </header>
+
+        <section class="status-strip">
+          <div>
+            <strong id="onlineCount">0</strong>
+            <span>çevrimiçi</span>
+          </div>
+          <div>
+            <strong id="voiceCount">0</strong>
+            <span>seste</span>
+          </div>
+          <div>
+            <strong id="qualityStatus">Dengeli</strong>
+            <span>ses modu</span>
+          </div>
+        </section>
 
         <div id="voiceBar" class="voice-bar hidden">
           <div>
@@ -145,8 +161,14 @@
 
             <label>
               Mikrofon eşiği
-              <input id="gateThresholdRange" type="range" min="12" max="70" step="1">
-              <span id="gateThresholdLabel" class="setting-value">32%</span>
+              <input id="gateThresholdRange" type="range" min="8" max="55" step="1">
+              <span id="gateThresholdLabel" class="setting-value">24%</span>
+            </label>
+
+            <label>
+              Mikrofon seviyesi
+              <div class="meter"><span id="micMeter"></span></div>
+              <span id="micMeterLabel" class="setting-value">0%</span>
             </label>
           </div>
 
@@ -180,6 +202,40 @@
         </form>
       </section>
     </main>
+
+    <section id="accountModal" class="modal hidden" aria-label="Hesap ayarları">
+      <form id="accountForm" class="modal-card">
+        <div class="modal-head">
+          <div>
+            <h2>Hesap Ayarları</h2>
+            <p>İsmini ve profil fotoğrafını buradan düzenle.</p>
+          </div>
+          <button id="closeAccountButton" class="icon-button" type="button">X</button>
+        </div>
+        <label>
+          Görünen isim
+          <input id="accountNameInput" type="text" maxlength="24" autocomplete="nickname">
+        </label>
+        <div class="account-photo-row">
+          <div class="avatar account-preview" id="accountAvatarPreview">?</div>
+          <button id="accountAvatarButton" class="ghost-button" type="button">Fotoğraf seç</button>
+        </div>
+        <button type="submit">Kaydet</button>
+      </form>
+    </section>
+
+    <section id="screenPickerModal" class="modal hidden" aria-label="Yayın kaynağı seç">
+      <div class="modal-card wide">
+        <div class="modal-head">
+          <div>
+            <h2>Yayın Kaynağı</h2>
+            <p>Paylaşmak istediğin ekranı veya pencereyi seç.</p>
+          </div>
+          <button id="closeScreenPickerButton" class="icon-button" type="button">X</button>
+        </div>
+        <div id="screenSourceGrid" class="screen-source-grid"></div>
+      </div>
+    </section>
 
     <section id="login" class="login">
       <form id="loginForm" class="login-card">
